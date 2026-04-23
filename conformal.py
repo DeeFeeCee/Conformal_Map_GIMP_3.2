@@ -34,7 +34,7 @@ from gi.repository import Gimp
 from gi.repository import GLib
 from gi.repository import GObject
 
-CONF_VERSION = "0.3.1"
+CONF_VERSION = "0.3.2"
 PROC_RENDER = "plug-in-conformal-render"
 
 # expose math functions to user equations in a controlled namespace
@@ -63,7 +63,7 @@ class ConformalRenderer:
     def __init__(self, width, height, code, constraint, xl, xr, yt, yb, grid, checkerboard):
         self.width = max(1, int(width))
         self.height = max(1, int(height))
-        self.code = code
+        self.code = self._normalize_code(code)
         self.constraint = constraint
         self.xl = float(xl)
         self.xr = float(xr)
@@ -79,6 +79,21 @@ class ConformalRenderer:
 
         self._compiled_code = compile(self.code, "conformal-code", "exec")
         self._compiled_constraint = compile(self.constraint, "conformal-constraint", "exec")
+
+    @staticmethod
+    def _normalize_code(code):
+        snippet = (code or "").strip()
+        if not snippet:
+            return "w = z"
+
+        try:
+            parsed = compile(snippet, "conformal-code-check", "eval")
+        except SyntaxError:
+            parsed = None
+
+        if parsed is not None:
+            return f"w = ({snippet})"
+        return snippet
 
     @staticmethod
     def _clamp_u8(x):
@@ -269,7 +284,6 @@ def _show_dialog(procedure, config):
     dialog.fill(
         [
             "code",
-            "constraint",
             "x-left",
             "x-right",
             "y-top",
@@ -290,7 +304,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     height = image.get_height()
 
     code = config.get_property("code")
-    constraint = config.get_property("constraint")
+    constraint = "p = True"
     xl = config.get_property("x-left")
     xr = config.get_property("x-right")
     yt = config.get_property("y-top")
@@ -304,7 +318,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         if not _show_dialog(procedure, config):
             return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
         code = config.get_property("code")
-        constraint = config.get_property("constraint")
+        constraint = "p = True"
         xl = config.get_property("x-left")
         xr = config.get_property("x-right")
         yt = config.get_property("y-top")
@@ -415,28 +429,21 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.set_menu_label("_Conformal Map (GIMP 3)")
         procedure.add_menu_path("<Image>/Filters/Distorts")
         procedure.set_documentation(
-            "Colour representation of a conformal map",
-            "Renders argument, logarithmic modulus and grid into three layers using the GIMP 3.2 API.",
+            "Distort an existing layer with a conformal map",
+            "Transforms the active layer through a conformal map and can optionally create argument/modulus/grid analysis layers.",
             name,
         )
         procedure.set_attribution("Michael J Gruber", "Ported for GIMP 3.2", "2026")
 
-        procedure.add_string_argument("code", "Code", "Python expression block assigning w", "w = z", GObject.ParamFlags.READWRITE)
-        procedure.add_string_argument(
-            "constraint",
-            "Constraint",
-            "Python expression block assigning boolean p",
-            "p = True",
-            GObject.ParamFlags.READWRITE,
-        )
-        procedure.add_double_argument("x-left", "X left", "Left bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("x-right", "X right", "Right bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("y-top", "Y top", "Top bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("y-bottom", "Y bottom", "Bottom bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("grid-spacing", "Grid spacing", "Grid spacing in mapped complex plane", 1.0e-12, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_boolean_argument("checkerboard", "Checkerboard", "Use checkerboard instead of line grid", False, GObject.ParamFlags.READWRITE)
-        procedure.add_boolean_argument("transform-active-layer", "Transform active layer", "Render transformed active layer", True, GObject.ParamFlags.READWRITE)
-        procedure.add_boolean_argument("create-analysis-layers", "Create analysis layers", "Create argument/modulus/grid helper layers", True, GObject.ParamFlags.READWRITE)
+        procedure.add_string_argument("code", "_Code", "Python expression or block assigning w", "z", GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("x-left", "_X left", "Left bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("x-right", "X _right", "Right bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("y-top", "_Y top", "Top bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("y-bottom", "Y _bottom", "Bottom bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("grid-spacing", "_Grid spacing", "Grid spacing in mapped complex plane", 1.0e-12, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_boolean_argument("checkerboard", "_Checkerboard", "Use checkerboard instead of line grid", False, GObject.ParamFlags.READWRITE)
+        procedure.add_boolean_argument("transform-active-layer", "_Transform active layer", "Transform pixels from the active layer", True, GObject.ParamFlags.READWRITE)
+        procedure.add_boolean_argument("create-analysis-layers", "_Create analysis layers", "Create argument/modulus/grid helper layers", True, GObject.ParamFlags.READWRITE)
 
         return procedure
 

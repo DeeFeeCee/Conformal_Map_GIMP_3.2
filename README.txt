@@ -8,6 +8,9 @@ conformal.py
 == Introduction
 `conformal.py` is a plugin-in for http://gimp.org[Gimp] which allows
 conformal image distortion and conformal-map visualisation.
+Its primary workflow is to transform an existing image (usually the
+active layer) through a complex map; the analysis layers are optional
+helpers.
 
 == Requirements
 You need `gimp` version 3.0 or above.
@@ -26,15 +29,23 @@ directory, usually `/usr/lib/gimp/3.*/plug-ins/` or (similar) on Linux,
 and make sure that it is executable (`chmod a+rx conformal.py`).
 
 === Usage
-After starting Gimp, you find the conformal plug-in in the `Create`
-submenu of the `File` menu. From the dialogue, you can adjust these parameters:
+After starting Gimp, you find the conformal plug-in in
+`Filters -> Distorts`. The default workflow is:
+
+1. Open or create an image.
+2. Choose the layer you want to distort.
+3. Run Conformal Map with `Transform active layer` enabled.
+4. Optionally keep `Create analysis layers` enabled to also generate
+   the argument/modulus/grid helper layers.
+
+From the dialogue, you can adjust these parameters:
 
 `width`, `height`::
 	The dimensions of the new image.
 `code`::
 	The python expression or assignment executed for every pixel.
 	The variable `z` is provided as the current complex coordinate.
-	If you provide an expression like `z*z` or `2*z + 1`, the plugin
+	If you provide an expression like `z*z` or `2*z + 1`, the plug-in
 	automatically treats it as `w = <expression>`.
 	If you provide an assignment, assign to `w`.
 `x left`, `x-right`::
@@ -45,13 +56,12 @@ submenu of the `File` menu. From the dialogue, you can adjust these parameters:
 	The spacing of the generated coordinate grid.
 `checker board`::
 	Use a checker board instead of a grid.
-`gradient`::
-	The gradient representing the argument of the complex number.
-
 NOTE: The old `constraint` parameter has been removed from the UI.
 Invalid points should be handled directly in your `code` expression.
 
-The plugin-in then creates a new image with three layers:
+With `Transform active layer` enabled, the plugin creates a
+`Conformal transform` layer from the active layer.
+If `Create analysis layers` is enabled, it additionally creates:
 
 `Grid`::
 	This layer paints the conformally transformed coordinate grid.
@@ -75,6 +85,10 @@ illustrations, or simply beautiful pictures!
 If your formula fails:
 
 * Use valid Python syntax. For example, `2z` is invalid Python; use `2*z`.
+* Mathematical notation like `w = 2z` is not valid Python; write
+  `w = 2*z`.
+* If you enter only an expression (`z*z`, `sin(z)`, etc.), it is
+  treated as `w = <expression>`.
 * If you get transparent/black output, start with a simple mapping
   (`z`, `z+1`, `z*z`) and increase complexity incrementally.
 * The warning about `GLibWin32` typelibs is environment-specific and is
