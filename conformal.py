@@ -34,7 +34,7 @@ from gi.repository import Gimp
 from gi.repository import GLib
 from gi.repository import GObject
 
-CONF_VERSION = "0.3.2"
+CONF_VERSION = "0.3.3"
 PROC_RENDER = "plug-in-conformal-render"
 
 # expose math functions to user equations in a controlled namespace
@@ -60,7 +60,7 @@ class ConformalRenderer:
 
     QUANT = 4096
 
-    def __init__(self, width, height, code, constraint, xl, xr, yt, yb, grid, checkerboard):
+    def __init__(self, width, height, code, constraint, xl, xr, yt, yb, grid, checkerboard, gradient):
         self.width = max(1, int(width))
         self.height = max(1, int(height))
         self.code = self._normalize_code(code)
@@ -71,6 +71,7 @@ class ConformalRenderer:
         self.yb = float(yb)
         self.grid = max(float(grid), 1e-9)
         self.checkerboard = bool(checkerboard)
+        self.gradient = gradient or "HSV"
 
         self._sx = (self.width - 1.0) / (self.xr - self.xl)
         self._sy = (self.height - 1.0) / (self.yt - self.yb)
@@ -99,8 +100,52 @@ class ConformalRenderer:
     def _clamp_u8(x):
         return max(0, min(255, int(x)))
 
+    @staticmethod
+    def _parse_hex_color(token):
+        value = token.strip().lstrip("#")
+        if len(value) != 6:
+            raise ValueError("Expected 6 hex digits")
+        return (
+            int(value[0:2], 16),
+            int(value[2:4], 16),
+            int(value[4:6], 16),
+            255,
+        )
+
+    @staticmethod
+    def _lerp_color(a, b, t):
+        return (
+            int(a[0] + (b[0] - a[0]) * t),
+            int(a[1] + (b[1] - a[1]) * t),
+            int(a[2] + (b[2] - a[2]) * t),
+            255,
+        )
+
     def _arg_color(self, arg_norm):
-        # Fast HSV wheel (s=1,v=1) for argument coloring.
+        # Built-in gradients or user-defined list (#RRGGBB,#RRGGBB,...)
+        gradient_name = self.gradient.strip().lower()
+        if gradient_name == "grayscale":
+            v = self._clamp_u8((arg_norm % 1.0) * 255.0)
+            return (v, v, v, 255)
+        if gradient_name == "white-black":
+            v = self._clamp_u8((1.0 - (arg_norm % 1.0)) * 255.0)
+            return (v, v, v, 255)
+        if gradient_name == "red-blue":
+            return self._lerp_color((255, 0, 0, 255), (0, 0, 255, 255), arg_norm % 1.0)
+        if "," in self.gradient:
+            try:
+                stops = [self._parse_hex_color(token) for token in self.gradient.split(",") if token.strip()]
+                if len(stops) >= 2:
+                    pos = (arg_norm % 1.0) * (len(stops) - 1)
+                    idx = int(pos)
+                    t = pos - idx
+                    if idx >= len(stops) - 1:
+                        return stops[-1]
+                    return self._lerp_color(stops[idx], stops[idx + 1], t)
+            except Exception:
+                pass
+
+        # Default: Fast HSV wheel (s=1,v=1) for argument coloring.
         h = (arg_norm % 1.0) * 6.0
         i = int(h)
         f = h - i
@@ -290,6 +335,7 @@ def _show_dialog(procedure, config):
             "y-bottom",
             "grid-spacing",
             "checkerboard",
+            "gradient",
             "transform-active-layer",
             "create-analysis-layers",
         ]
@@ -311,6 +357,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     yb = config.get_property("y-bottom")
     grid = config.get_property("grid-spacing")
     checkerboard = config.get_property("checkerboard")
+    gradient = config.get_property("gradient")
     transform_layer = config.get_property("transform-active-layer")
     create_analysis = config.get_property("create-analysis-layers")
 
@@ -325,10 +372,11 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         yb = config.get_property("y-bottom")
         grid = config.get_property("grid-spacing")
         checkerboard = config.get_property("checkerboard")
+        gradient = config.get_property("gradient")
         transform_layer = config.get_property("transform-active-layer")
         create_analysis = config.get_property("create-analysis-layers")
 
-    renderer = ConformalRenderer(width, height, code, constraint, xl, xr, yt, yb, grid, checkerboard)
+    renderer = ConformalRenderer(width, height, code, constraint, xl, xr, yt, yb, grid, checkerboard, gradient)
     source = drawables[0] if drawables else image.get_active_layer()
     source_pixels = _drawable_pixels_rgba(source, width, height) if (transform_layer and source is not None) else None
 
@@ -396,6 +444,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             f"constraint = \"\"\"\n{constraint}\n\"\"\"\n"
             f"xl = {xl}\nxr = {xr}\nyt = {yt}\nyb = {yb}\n"
             f"grid = {grid}\ncheckerboard = {int(checkerboard)}\n"
+            f"gradient = {gradient}\n"
             f"width = {width}\nheight = {height}\n"
         )
         parasite = Gimp.Parasite.new("gimp-comment", Gimp.PARASITE_PERSISTENT, comment.encode("utf-8"))
@@ -442,6 +491,13 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_double_argument("y-bottom", "Y _bottom", "Bottom bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("grid-spacing", "_Grid spacing", "Grid spacing in mapped complex plane", 1.0e-12, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("checkerboard", "_Checkerboard", "Use checkerboard instead of line grid", False, GObject.ParamFlags.READWRITE)
+        procedure.add_string_argument(
+            "gradient",
+            "_Gradient",
+            "Argument gradient: HSV, grayscale, red-blue, white-black, or comma-separated #RRGGBB stops",
+            "HSV",
+            GObject.ParamFlags.READWRITE,
+        )
         procedure.add_boolean_argument("transform-active-layer", "_Transform active layer", "Transform pixels from the active layer", True, GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("create-analysis-layers", "_Create analysis layers", "Create argument/modulus/grid helper layers", True, GObject.ParamFlags.READWRITE)
 

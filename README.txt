@@ -56,6 +56,11 @@ From the dialogue, you can adjust these parameters:
 	The spacing of the generated coordinate grid.
 `checker board`::
 	Use a checker board instead of a grid.
+`gradient`::
+	Gradient used for the `Argument` layer. Supported values are
+	`HSV` (default), `grayscale`, `red-blue`, `white-black`, or a custom
+	comma-separated list of hex stops such as
+	`#ff0000,#ffff00,#00ff00,#00ffff,#0000ff`.
 NOTE: The old `constraint` parameter has been removed from the UI.
 Invalid points should be handled directly in your `code` expression.
 
@@ -73,7 +78,7 @@ If `Create analysis layers` is enabled, it additionally creates:
 	is used as an index into the default white-black gradient.
 	 
 `Argument`::
-	This layer is coloured using the value of the gradient
+	This layer is coloured by the selected `gradient`
 	at an index corresponding to `arg w`.
 
 The two topmost layers have transparency and layer mode set
