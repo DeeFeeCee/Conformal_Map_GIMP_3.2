@@ -400,7 +400,7 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.set_image_types("*")
         procedure.set_sensitivity_mask(Gimp.ProcedureSensitivityMask.DRAWABLE | Gimp.ProcedureSensitivityMask.NO_DRAWABLES)
         procedure.set_menu_label("_Conformal Map (GIMP 3)")
-        procedure.add_menu_path("<Image>/Filters/Render")
+        procedure.add_menu_path("<Image>/Filters/Distorts")
         procedure.set_documentation(
             "Colour representation of a conformal map",
             "Renders argument, logarithmic modulus and grid into three layers using the GIMP 3.2 API.",
