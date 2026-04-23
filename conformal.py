@@ -1,12 +1,25 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
+'''
+conformal.py
+Conformal map renderer for GIMP 3.2+
+Copyright (C) 2006-2011  Michael J. Gruber <conformal@drmicha.warpmail.net>
+Updated for version 3.2 by DeeFeeCee
 
-"""Conformal map renderer for GIMP 3.2.
+This plug-in ports the original GIMP 2 plug-in to the GIMP 3 API
 
-This plug-in ports the original GIMP 2 plug-in to the GIMP 3 API and keeps
-rendering work in pure Python bytearrays before committing a full buffer at
-once, which is significantly faster than per-pixel GIMP API calls.
-"""
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, version 2 of the License.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+'''
 
 import cmath
 import math
@@ -21,7 +34,7 @@ from gi.repository import Gimp
 from gi.repository import GLib
 from gi.repository import GObject
 
-CONF_VERSION = "1.0-gimp3"
+CONF_VERSION = "0.3.1"
 PROC_RENDER = "plug-in-conformal-render"
 
 # expose math functions to user equations in a controlled namespace
@@ -43,7 +56,7 @@ for _name in dir(cmath):
 
 
 class ConformalRenderer:
-    """Pixel renderer independent from GIMP glue code."""
+    #Pixel renderer independent from GIMP glue code.
 
     QUANT = 4096
 
@@ -72,7 +85,7 @@ class ConformalRenderer:
         return max(0, min(255, int(x)))
 
     def _arg_color(self, arg_norm):
-        """Fast HSV wheel (s=1,v=1) for argument coloring."""
+        # Fast HSV wheel (s=1,v=1) for argument coloring.
         h = (arg_norm % 1.0) * 6.0
         i = int(h)
         f = h - i
