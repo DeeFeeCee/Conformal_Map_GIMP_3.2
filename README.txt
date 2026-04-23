@@ -42,9 +42,11 @@ submenu of the `File` menu. From the dialogue, you can adjust these parameters:
 `width`, `height`::
 	The dimensions of the new image.
 `code`::
-	The python code executed for every pixel.
-	The variable `z` is provided as the current complex coordinate and
-	the code should assign a value to `w`.
+	The python expression or assignment executed for every pixel.
+	The variable `z` is provided as the current complex coordinate.
+	If you provide an expression like `z*z` or `2*z + 1`, the plugin
+	automatically treats it as `w = <expression>`.
+	If you provide an assignment, assign to `w`.
 `x left`, `x-right`::
 	The range of x-values (real parts) which is mapped to the horizontal image axis.
 `y top`, `y bottom`::
@@ -56,9 +58,8 @@ submenu of the `File` menu. From the dialogue, you can adjust these parameters:
 `gradient`::
 	The gradient representing the argument of the complex number.
 
-`constraint`::
-	Python code that can set `p` to `True` or `False` to indicate whether
-	a pixel should be considered valid before evaluating the mapping code.
+NOTE: The old `constraint` parameter has been removed from the UI.
+Invalid points should be handled directly in your `code` expression.
 
 The plugin then creates a new image with three layers:
 
