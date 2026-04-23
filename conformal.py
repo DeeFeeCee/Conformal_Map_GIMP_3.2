@@ -39,15 +39,20 @@ except ImportError:
 	pass
 
 
-def conformal_batch(width, height, code, constraint, xl, xr, yt, yb, grid, checkboard, gradient, filename):
-	conformal_core(width, height, code, constraint, xl, xr, yt, yb, grid, checkboard, gradient, filename)
+def conformal_batch(width, height, code, xl, xr, yt, yb, grid, checkboard, gradient, filename):
+	conformal_core(width, height, code, xl, xr, yt, yb, grid, checkboard, gradient, filename)
 
 
-def conformal(width, height, code, constraint, xl, xr, yt, yb, grid, checkboard, gradient):
-	conformal_core(width, height, code, constraint, xl, xr, yt, yb, grid, checkboard, gradient, None)
+def conformal(width, height, code, xl, xr, yt, yb, grid, checkboard, gradient):
+	conformal_core(width, height, code, xl, xr, yt, yb, grid, checkboard, gradient, None)
 
 
-def conformal_core(width, height, code, constraint, xl, xr, yt, yb, grid, checkboard, gradient, filename):
+def conformal_core(width, height, code, xl, xr, yt, yb, grid, checkboard, gradient, filename):
+	if "=" in code and "==" not in code:
+		code = code.strip()
+	else:
+		code = "w = " + code.strip()
+
 	image = gimp.Image(width, height, RGB) 
 	drawables = [ gimp.Layer(image, "Argument", width, height, RGBA_IMAGE, 100, NORMAL_MODE),
 		      gimp.Layer(image, "Log. modulus", width, height, RGBA_IMAGE, 35, VALUE_MODE),
@@ -75,8 +80,11 @@ def conformal_core(width, height, code, constraint, xl, xr, yt, yb, grid, checkb
 	mp2 = 2.0*math.pi # no need to do this 500*500 times...
 	ml2 = 2.0*math.log(2) # no need to do this 500*500 times...
 	ml = math.log(2) # no need to do this 500*500 times...
-	compiled=compile(code, "compiled code", "exec", 0, 1)
-	compiledconstraint=compile(constraint, "compiled constraint code", "exec", 0, 1)
+	try:
+		compiled=compile(code, "compiled code", "exec", 0, 1)
+	except SyntaxError as err:
+		gimp.message("Conformal expression syntax error: %s" % err)
+		return
 
 	dests = [ array("B", "\x00" * width*height*bpp) for i in range(3) ]
 
@@ -99,16 +107,9 @@ def conformal_core(width, height, code, constraint, xl, xr, yt, yb, grid, checkb
 			z = col/sx + xl + 1j*( yt - row/sy)
 			p = True
 			try:
-				exec(compiledconstraint)
+				exec(compiled)
 			except (OverflowError, ValueError):
 				p = False
-			if not p:
-				w = 0.0
-			else:
-				try:
-					exec(compiled)
-				except (OverflowError, ValueError):
-					p = False
 			if not p or isnan(w) or isinf(w):
 				w = 0.0
 
@@ -176,7 +177,7 @@ code = \"\"\"
 %s
 \"\"\"
 constraint = \"\"\"
-%s
+p = True
 \"\"\"
 xl = %f
 xr = %f
@@ -187,7 +188,7 @@ checkboard = %d
 gradient = "%s"
 width = %d
 height = %d
-""" % (confversion, code, constraint, xl, xr, yt, yb, grid, checkboard, gradient, width, height))
+""" % (confversion, code, xl, xr, yt, yb, grid, checkboard, gradient, width, height))
 	if filename is None:
 		image.enable_undo()
 		gimp.Display(image)
@@ -202,8 +203,8 @@ height = %d
 
 register(
 	"conformal_batch",
-	"Colour representation of a conformal map",
-	"Colour representation of a conformal map",
+	"Conformal image distortion and analysis layer generation",
+	"Conformal image distortion and analysis layer generation",
 	"Michael J Gruber",
 	"Michael J Gruber",
 	"2011",
@@ -212,14 +213,13 @@ register(
 	[
 		(PF_INT, "width", "width", 512),
 		(PF_INT, "height", "height", 512),
-		(PF_TEXT, "code", "code", "w=z"),
-		(PF_TEXT, "constraint", "constraint", "p=True"),
-		(PF_FLOAT, "xl", "x left", -1.0),
-		(PF_FLOAT, "xr", "x right", 1.0),
-		(PF_FLOAT, "yt", "y top", 1.0),
-		(PF_FLOAT, "yb", "y bottom", -1.0),
-		(PF_FLOAT, "grid", "grid spacing", 1.0),
-		(PF_BOOL, "checkboard", "checker board grid", 0),
+		(PF_TEXT, "code", "_code", "w=z"),
+		(PF_FLOAT, "xl", "x _left", -1.0),
+		(PF_FLOAT, "xr", "x _right", 1.0),
+		(PF_FLOAT, "yt", "y _top", 1.0),
+		(PF_FLOAT, "yb", "y _bottom", -1.0),
+		(PF_FLOAT, "grid", "_grid spacing", 1.0),
+		(PF_BOOL, "checkboard", "_checker board grid", 0),
 		(PF_GRADIENT, "gradient", "gradient", "Full saturation spectrum CCW"),
 		(PF_FILE, "file", "file", "out.xcf.bz2"),
 	],
@@ -228,8 +228,8 @@ register(
 
 register(
 	"conformal",
-	"Colour representation of a conformal map",
-	"Colour representation of a conformal map",
+	"Conformal image distortion and analysis layer generation",
+	"Conformal image distortion and analysis layer generation",
 	"Michael J Gruber",
 	"Michael J Gruber",
 	"2012",
@@ -238,14 +238,13 @@ register(
 	[
 		(PF_INT, "width", "width", 512),
 		(PF_INT, "height", "height", 512),
-		(PF_TEXT, "code", "code", "w=z"),
-		(PF_TEXT, "constraint", "constraint", "p=True"),
-		(PF_FLOAT, "xl", "x left", -1.0),
-		(PF_FLOAT, "xr", "x right", 1.0),
-		(PF_FLOAT, "yt", "y top", 1.0),
-		(PF_FLOAT, "yb", "y bottom", -1.0),
-		(PF_FLOAT, "grid", "grid spacing", 1.0),
-		(PF_BOOL, "checkboard", "checker board grid", 0),
+		(PF_TEXT, "code", "_code", "w=z"),
+		(PF_FLOAT, "xl", "x _left", -1.0),
+		(PF_FLOAT, "xr", "x _right", 1.0),
+		(PF_FLOAT, "yt", "y _top", 1.0),
+		(PF_FLOAT, "yb", "y _bottom", -1.0),
+		(PF_FLOAT, "grid", "_grid spacing", 1.0),
+		(PF_BOOL, "checkboard", "_checker board grid", 0),
 		(PF_GRADIENT, "gradient", "gradient", "Full saturation spectrum CCW"),
 	],
 	[],
