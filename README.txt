@@ -1,36 +1,41 @@
 conformal.py
-============
-:Author: Michael J. Gruber
-:Email:  conformal@drmicha.warpmail.net
-:Revision: 0.3
+Author: Michael J. Gruber
+Email: conformal@drmicha.warpmail.net
+Revision: 0.3
 
-== Introduction
-`conformal.py` is a plugin-in for http://gimp.org[The Gimp] which allows
+Introduction
+------------
+`conformal.py` is a plugin for http://gimp.org[The Gimp] which allows
 conformal image distortion and conformal-map visualisation.
 
-IMPORTANT: The project goal is to *distort an existing image using a
-conformal mapping*. The generated grid/argument/modulus output is
+IMPORTANT: The intended project goal is to *distort an existing image
+using a conformal mapping*. The generated grid/argument/modulus output is
 diagnostic output, not the primary objective.
 
-== Requirements
+Requirements
+------------
 You need `gimp` and the python scripting extension to Gimp. It is
 included in newer versions of Gimp, before it was available in packages
 named `gimp-python` or similar.
 
-== Installation
+Installation
+------------
 You can install `conformal.py` as a local user or system wide:
 
-=== Local User
+Local User
+~~~~~~~~~~
 Copy `conformal.py` to the `plug-ins` subdirectory of your Gimp
 directory, usually `$HOME/.gimp-2.*/plug-ins/` on Linux, and make sure
 that it is executable (`chmod +x conformal.py`).
 
-=== System wide
+System wide
+~~~~~~~~~~~
 Copy `conformal.py` to the `plug-ins` subdirectory of your system Gimp
 directory, usually `/usr/lib/gimp/2.*/plug-ins/` or (similar) on Linux,
 and make sure that it is executable (`chmod a+rx conformal.py`).
 
-=== Usage
+Usage
+-----
 After starting The Gimp, you find the conformal plug-in in the `Create`
 submenu of the `File` menu. From the dialogue, you can adjust these parameters:
 
@@ -55,7 +60,7 @@ submenu of the `File` menu. From the dialogue, you can adjust these parameters:
 	Python code that can set `p` to `True` or `False` to indicate whether
 	a pixel should be considered valid before evaluating the mapping code.
 
-The plugin-in then creates a new image with three layers:
+The plugin then creates a new image with three layers:
 
 `Grid`::
 	This layer paints the conformally transformed coordinate grid.
@@ -75,7 +80,8 @@ appropriately, but feel free to experiment with these, as well as
 turning some layers off, depending on your goal: produce instructive
 illustrations, or simply beautiful pictures!
 
-== Troubleshooting
+Troubleshooting
+---------------
 If your formula fails:
 
 * Use valid Python syntax. For example, `2z` is invalid Python; use `2*z`.
@@ -84,6 +90,7 @@ If your formula fails:
 * The warning about `GLibWin32` typelibs is environment-specific and is
   unrelated to conformal expression parsing.
 
-== License
+License
+-------
 `conformal.py` is copy righted by {author} and is available
 under the GNU General Public License Version 2.
