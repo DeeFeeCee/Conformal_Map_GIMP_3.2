@@ -6,7 +6,11 @@ conformal.py
 
 == Introduction
 `conformal.py` is a plugin-in for http://gimp.org[The Gimp] which allows
-visualisation of conformal maps.
+conformal image distortion and conformal-map visualisation.
+
+IMPORTANT: The project goal is to *distort an existing image using a
+conformal mapping*. The generated grid/argument/modulus output is
+diagnostic output, not the primary objective.
 
 == Requirements
 You need `gimp` and the python scripting extension to Gimp. It is
@@ -33,10 +37,9 @@ submenu of the `File` menu. From the dialogue, you can adjust these parameters:
 `width`, `height`::
 	The dimensions of the new image.
 `code`::
-	The python code which is executed for every single pixel of the
-	image. The code can use the value of the complex number `z`
-	(which represents the current pixel) and should assign a value
-	to `w` which will be considered the (mapping) image of `z`.
+	The python code executed for every pixel.
+	The variable `z` is provided as the current complex coordinate and
+	the code should assign a value to `w`.
 `x left`, `x-right`::
 	The range of x-values (real parts) which is mapped to the horizontal image axis.
 `y top`, `y bottom`::
@@ -47,6 +50,10 @@ submenu of the `File` menu. From the dialogue, you can adjust these parameters:
 	Use a checker board instead of a grid.
 `gradient`::
 	The gradient representing the argument of the complex number.
+
+`constraint`::
+	Python code that can set `p` to `True` or `False` to indicate whether
+	a pixel should be considered valid before evaluating the mapping code.
 
 The plugin-in then creates a new image with three layers:
 
@@ -67,6 +74,15 @@ The two topmost layers have transparency and layer mode set
 appropriately, but feel free to experiment with these, as well as
 turning some layers off, depending on your goal: produce instructive
 illustrations, or simply beautiful pictures!
+
+== Troubleshooting
+If your formula fails:
+
+* Use valid Python syntax. For example, `2z` is invalid Python; use `2*z`.
+* If you get transparent/black output, start with a simple mapping
+  (`z`, `z+1`, `z*z`) and increase complexity incrementally.
+* The warning about `GLibWin32` typelibs is environment-specific and is
+  unrelated to conformal expression parsing.
 
 == License
 `conformal.py` is copy righted by {author} and is available
