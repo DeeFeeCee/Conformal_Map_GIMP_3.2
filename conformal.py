@@ -180,6 +180,13 @@ class ConformalRenderer:
         return bytes(arg_data), bytes(mod_data), bytes(grid_data)
 
 
+def _layer_mode(*names):
+    for name in names:
+        if hasattr(Gimp.LayerMode, name):
+            return getattr(Gimp.LayerMode, name)
+    raise AttributeError(f"No supported layer mode found in candidates: {names}")
+
+
 def _push_bytes_to_layer(layer, width, height, rgba_bytes):
     buffer = layer.get_buffer()
     rect = Gegl.Rectangle.new(0, 0, width, height)
@@ -220,7 +227,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             height,
             Gimp.ImageType.RGBA_IMAGE,
             100.0,
-            Gimp.LayerMode.NORMAL,
+            _layer_mode("NORMAL", "NORMAL_LEGACY"),
         )
         mod_layer = Gimp.Layer.new(
             image,
@@ -229,16 +236,16 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             height,
             Gimp.ImageType.RGBA_IMAGE,
             35.0,
-            Gimp.LayerMode.VALUE,
+            _layer_mode("LCH_VALUE", "HSV_VALUE", "VALUE", "VALUE_LEGACY"),
         )
         grid_layer = Gimp.Layer.new(
             image,
             "Grid",
             width,
             height,
-            1,
+            Gimp.ImageType.RGBA_IMAGE,
             10.0,
-            Gimp.LayerMode.DARKEN_ONLY,
+            _layer_mode("DARKEN_ONLY", "DARKEN_ONLY_LEGACY", "DARKEN", "DARKEN_LEGACY"),
         )
 
         image.insert_layer(arg_layer, None, -1)
