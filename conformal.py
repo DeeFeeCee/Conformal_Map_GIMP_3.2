@@ -23,6 +23,8 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
 import cmath
 import math
+import ast
+import re
 import sys
 
 import gi
@@ -96,22 +98,56 @@ class ConformalRenderer:
         self._two_pi = 2.0 * math.pi
         self._log2 = math.log(2.0)
 
-        self._compiled_code = compile(self.code, "conformal-code", "eval")
+        self._compiled_code = compile(self.code, "conformal-code", "exec")
         self._compiled_constraint = compile(self.constraint, "conformal-constraint", "exec")
 
     @staticmethod
     def _normalize_code(code):
         snippet = (code or "").strip()
         if not snippet:
-            return "z"
-        if "#" in snippet or ";" in snippet or "\n" in snippet or "\r" in snippet:
-            raise ValueError("Only a single expression is allowed (no comments/statements).")
+            return "w = z"
         # Map common math notation to Python.
         snippet = snippet.replace("^", "**")
-        if snippet.startswith("w=") or snippet.startswith("w ="):
-            snippet = snippet.split("=", 1)[1].strip()
-        compile(snippet, "conformal-code-check", "eval")
+        # Interpret "i" as the imaginary unit, including forms like 0.2i.
+        snippet = re.sub(r"(?<=\d)i\b", "j", snippet)
+        snippet = re.sub(r"\bi\b", "(1j)", snippet)
+        ConformalRenderer._validate_code_ast(snippet)
+        parsed = ast.parse(snippet, mode="exec")
+        has_w_assignment = False
+        for node in ast.walk(parsed):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "w":
+                        has_w_assignment = True
+            elif isinstance(node, ast.AnnAssign):
+                if isinstance(node.target, ast.Name) and node.target.id == "w":
+                    has_w_assignment = True
+        if not has_w_assignment:
+            snippet = f"w = ({snippet})"
         return snippet
+
+    @staticmethod
+    def _validate_code_ast(snippet):
+        tree = ast.parse(snippet, mode="exec")
+        blocked = (
+            ast.Import,
+            ast.ImportFrom,
+            ast.With,
+            ast.AsyncWith,
+            ast.Try,
+            ast.Raise,
+            ast.Global,
+            ast.Nonlocal,
+            ast.Delete,
+            ast.ClassDef,
+            ast.Lambda,
+            ast.Await,
+            ast.Yield,
+            ast.YieldFrom,
+        )
+        for node in ast.walk(tree):
+            if isinstance(node, blocked):
+                raise ValueError(f"Unsupported code construct: {type(node).__name__}")
 
     @staticmethod
     def _clamp_u8(x):
@@ -208,7 +244,7 @@ class ConformalRenderer:
 
         if env.get("p", False):
             try:
-                env["w"] = eval(self._compiled_code, {"__builtins__": {}}, env)
+                exec(self._compiled_code, {"__builtins__": {}}, env)
             except Exception:
                 env["p"] = False
 
@@ -567,7 +603,13 @@ class ConformalPlugin(Gimp.PlugIn):
         )
         procedure.set_attribution("Michael J Gruber", "Ported for GIMP 3.2", "2026")
 
-        procedure.add_string_argument("code", "_Formula", "Single Python expression for w(z); '^' is accepted as exponent", "z", GObject.ParamFlags.READWRITE)
+        procedure.add_string_argument(
+            "code",
+            "_Formula",
+            "Python code assigning w; supports helper functions/recursion, '^' exponentiation, and 'i' as imaginary unit",
+            "w = z",
+            GObject.ParamFlags.READWRITE,
+        )
         procedure.add_double_argument("x-left", "X _left", "Left bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("x-right", "X r_ight", "Right bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("y-top", "Y _top", "Top bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)

@@ -43,10 +43,12 @@ From the dialogue, you can adjust these parameters:
 `width`, `height`::
 	The dimensions of the new image.
 `code`::
-	A single python expression executed for every pixel.
+	Python code executed for every pixel.
 	The variable `z` is provided as the current complex coordinate.
+	Assign the mapped value to `w`.
+	You can use multi-line code, helper functions, and recursive calls.
 	Use `^` or `**` for exponentiation (`z^2` and `z**2` both work).
-	Only expressions are accepted (no comments or multi-line statements).
+	The symbol `i` is interpreted as Python's imaginary unit `j`.
 `x left`, `x-right`::
 	The range of x-values (real parts) which is mapped to the horizontal image axis.
 `y top`, `y bottom`::
@@ -99,7 +101,9 @@ If your formula fails:
 * Use valid Python syntax. For example, `2z` is invalid Python; use `2*z`.
 * Mathematical notation like `2z` is not valid Python; write `2*z`.
 * `^` is accepted for exponentiation and automatically converted to `**`.
-* Comments (`#`), semicolons, and multi-line input are rejected for safety.
+* `i` is accepted as the imaginary unit and converted to `j`.
+* Helper functions and recursive expressions are supported as long as
+  the final code assigns `w`.
 * If you get transparent/black output, start with a simple mapping
   (`z`, `z+1`, `z*z`) and increase complexity incrementally.
 * If transformed pixels fall outside the source bounds, set `abyss mode`
