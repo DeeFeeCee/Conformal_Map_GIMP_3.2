@@ -34,8 +34,9 @@ from gi.repository import Gimp
 from gi.repository import GLib
 from gi.repository import GObject
 
-CONF_VERSION = "0.3.3"
+CONF_VERSION = "0.3.4"
 PROC_RENDER = "plug-in-conformal-render"
+_UI_INITIALIZED = False
 
 # expose math functions to user equations in a controlled namespace
 MATH_NAMESPACE = {
@@ -60,7 +61,22 @@ class ConformalRenderer:
 
     QUANT = 4096
 
-    def __init__(self, width, height, code, constraint, xl, xr, yt, yb, grid, checkerboard, gradient):
+    def __init__(
+        self,
+        width,
+        height,
+        code,
+        constraint,
+        xl,
+        xr,
+        yt,
+        yb,
+        grid,
+        checkerboard,
+        gradient,
+        abyss_mode,
+        abyss_loop_iterations,
+    ):
         self.width = max(1, int(width))
         self.height = max(1, int(height))
         self.code = self._normalize_code(code)
@@ -72,28 +88,29 @@ class ConformalRenderer:
         self.grid = max(float(grid), 1e-9)
         self.checkerboard = bool(checkerboard)
         self.gradient = gradient or "HSV"
+        self.abyss_mode = (abyss_mode or "transparent").strip().lower()
+        self.abyss_loop_iterations = max(1, int(abyss_loop_iterations))
 
         self._sx = (self.width - 1.0) / (self.xr - self.xl)
         self._sy = (self.height - 1.0) / (self.yt - self.yb)
         self._two_pi = 2.0 * math.pi
         self._log2 = math.log(2.0)
 
-        self._compiled_code = compile(self.code, "conformal-code", "exec")
+        self._compiled_code = compile(self.code, "conformal-code", "eval")
         self._compiled_constraint = compile(self.constraint, "conformal-constraint", "exec")
 
     @staticmethod
     def _normalize_code(code):
         snippet = (code or "").strip()
         if not snippet:
-            return "w = z"
-
-        try:
-            parsed = compile(snippet, "conformal-code-check", "eval")
-        except SyntaxError:
-            parsed = None
-
-        if parsed is not None:
-            return f"w = ({snippet})"
+            return "z"
+        if "#" in snippet or ";" in snippet or "\n" in snippet or "\r" in snippet:
+            raise ValueError("Only a single expression is allowed (no comments/statements).")
+        # Map common math notation to Python.
+        snippet = snippet.replace("^", "**")
+        if snippet.startswith("w=") or snippet.startswith("w ="):
+            snippet = snippet.split("=", 1)[1].strip()
+        compile(snippet, "conformal-code-check", "eval")
         return snippet
 
     @staticmethod
@@ -185,13 +202,13 @@ class ConformalRenderer:
         env = {"z": z, "w": 0j, "p": True}
         env.update(MATH_NAMESPACE)
         try:
-            exec(self._compiled_constraint, {"__builtins__": {}}, env)
+                exec(self._compiled_constraint, {"__builtins__": {}}, env)
         except Exception:
             env["p"] = False
 
         if env.get("p", False):
             try:
-                exec(self._compiled_code, {"__builtins__": {}}, env)
+                env["w"] = eval(self._compiled_code, {"__builtins__": {}}, env)
             except Exception:
                 env["p"] = False
 
@@ -220,6 +237,26 @@ class ConformalRenderer:
         if not valid:
             return False, 0j, 0.0, 0.0, 0
         return True, w, arg_norm, mod, sqr
+
+    def _sample_mapped_pixel(self, source_pixels, sx, sy):
+        if self.abyss_mode == "clamp":
+            sx = min(max(0, sx), self.width - 1)
+            sy = min(max(0, sy), self.height - 1)
+            sidx = (sy * self.width + sx) * 4
+            return tuple(source_pixels[sidx:sidx + 4])
+        if self.abyss_mode == "loop":
+            for _ in range(self.abyss_loop_iterations):
+                if 0 <= sx < self.width and 0 <= sy < self.height:
+                    sidx = (sy * self.width + sx) * 4
+                    return tuple(source_pixels[sidx:sidx + 4])
+                sx %= self.width
+                sy %= self.height
+            return (0, 0, 0, 0)
+        if self.abyss_mode == "black":
+            return (0, 0, 0, 255)
+        if self.abyss_mode == "white":
+            return (255, 255, 255, 255)
+        return (0, 0, 0, 0)
 
     def render(self, source_pixels=None, progress_cb=None):
         arg_data = bytearray(self.width * self.height * 4)
@@ -253,7 +290,7 @@ class ConformalRenderer:
                             sidx = (sy * self.width + sx) * 4
                             mapped_px = tuple(source_pixels[sidx:sidx + 4])
                         else:
-                            mapped_px = (0, 0, 0, 0)
+                            mapped_px = self._sample_mapped_pixel(source_pixels, sx, sy)
 
                 idx = base + (col * 4)
                 arg_data[idx:idx + 4] = bytes(arg_px)
@@ -306,6 +343,15 @@ def _gegl_to_u8(color):
 
 
 def _drawable_pixels_rgba(drawable, width, height):
+    buffer = drawable.get_buffer()
+    rect = Gegl.Rectangle.new(0, 0, width, height)
+    try:
+        raw = buffer.get(rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.NONE)
+        if raw is not None:
+            return bytes(raw)
+    except Exception:
+        pass
+
     data = bytearray(width * height * 4)
     for y in range(height):
         row = y * width * 4
@@ -323,8 +369,12 @@ def _show_dialog(procedure, config):
     gi.require_version("GimpUi", "3.0")
     gi.require_version("Gtk", "3.0")
     from gi.repository import GimpUi
+    from gi.repository import Gtk
 
-    GimpUi.init(PROC_RENDER)
+    global _UI_INITIALIZED
+    if not _UI_INITIALIZED:
+        GimpUi.init(PROC_RENDER)
+        _UI_INITIALIZED = True
     dialog = GimpUi.ProcedureDialog.new(procedure, config, "Conformal Map")
     dialog.fill(
         [
@@ -335,13 +385,33 @@ def _show_dialog(procedure, config):
             "y-bottom",
             "grid-spacing",
             "checkerboard",
-            "gradient",
+            "gradient-preset",
+            "gradient-custom",
+            "abyss-mode",
+            "abyss-loop-iterations",
             "transform-active-layer",
             "create-analysis-layers",
         ]
     )
     accepted = dialog.run()
     dialog.destroy()
+    if accepted and config.get_property("gradient-preset") == "custom":
+        entry_dialog = Gtk.Dialog(title="Custom gradient", modal=True)
+        entry_dialog.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+        entry_dialog.add_button("_OK", Gtk.ResponseType.OK)
+        box = entry_dialog.get_content_area()
+        label = Gtk.Label(label="Enter comma-separated hex stops (#RRGGBB,#RRGGBB,...)")
+        entry = Gtk.Entry()
+        entry.set_text(config.get_property("gradient-custom"))
+        box.add(label)
+        box.add(entry)
+        entry_dialog.show_all()
+        response = entry_dialog.run()
+        if response == Gtk.ResponseType.OK:
+            config.set_property("gradient-custom", entry.get_text())
+        else:
+            accepted = False
+        entry_dialog.destroy()
     return accepted
 
 
@@ -357,7 +427,11 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     yb = config.get_property("y-bottom")
     grid = config.get_property("grid-spacing")
     checkerboard = config.get_property("checkerboard")
-    gradient = config.get_property("gradient")
+    gradient_preset = config.get_property("gradient-preset")
+    gradient_custom = config.get_property("gradient-custom")
+    gradient = gradient_custom if gradient_preset == "custom" else gradient_preset
+    abyss_mode = config.get_property("abyss-mode")
+    abyss_loop_iterations = config.get_property("abyss-loop-iterations")
     transform_layer = config.get_property("transform-active-layer")
     create_analysis = config.get_property("create-analysis-layers")
 
@@ -372,11 +446,29 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         yb = config.get_property("y-bottom")
         grid = config.get_property("grid-spacing")
         checkerboard = config.get_property("checkerboard")
-        gradient = config.get_property("gradient")
+        gradient_preset = config.get_property("gradient-preset")
+        gradient_custom = config.get_property("gradient-custom")
+        gradient = gradient_custom if gradient_preset == "custom" else gradient_preset
+        abyss_mode = config.get_property("abyss-mode")
+        abyss_loop_iterations = config.get_property("abyss-loop-iterations")
         transform_layer = config.get_property("transform-active-layer")
         create_analysis = config.get_property("create-analysis-layers")
 
-    renderer = ConformalRenderer(width, height, code, constraint, xl, xr, yt, yb, grid, checkerboard, gradient)
+    renderer = ConformalRenderer(
+        width,
+        height,
+        code,
+        constraint,
+        xl,
+        xr,
+        yt,
+        yb,
+        grid,
+        checkerboard,
+        gradient,
+        abyss_mode,
+        abyss_loop_iterations,
+    )
     source = drawables[0] if drawables else image.get_active_layer()
     source_pixels = _drawable_pixels_rgba(source, width, height) if (transform_layer and source is not None) else None
 
@@ -390,18 +482,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
 
     image.undo_group_start()
     try:
-        if transform_layer and mapped_pixels is not None:
-            mapped_layer = Gimp.Layer.new(
-                image,
-                "Conformal transform",
-                width,
-                height,
-                Gimp.ImageType.RGBA_IMAGE,
-                100.0,
-                _layer_mode("NORMAL", "NORMAL_LEGACY"),
-            )
-            image.insert_layer(mapped_layer, None, -1)
-            _push_bytes_to_layer(mapped_layer, width, height, mapped_pixels)
+        if transform_layer and mapped_pixels is not None and source is not None:
+            _push_bytes_to_layer(source, width, height, mapped_pixels)
 
         if create_analysis:
             arg_layer = Gimp.Layer.new(
@@ -445,6 +527,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             f"xl = {xl}\nxr = {xr}\nyt = {yt}\nyb = {yb}\n"
             f"grid = {grid}\ncheckerboard = {int(checkerboard)}\n"
             f"gradient = {gradient}\n"
+            f"abyss_mode = {abyss_mode}\nabyss_loop_iterations = {abyss_loop_iterations}\n"
             f"width = {width}\nheight = {height}\n"
         )
         parasite = Gimp.Parasite.new("gimp-comment", Gimp.PARASITE_PERSISTENT, comment.encode("utf-8"))
@@ -484,22 +567,45 @@ class ConformalPlugin(Gimp.PlugIn):
         )
         procedure.set_attribution("Michael J Gruber", "Ported for GIMP 3.2", "2026")
 
-        procedure.add_string_argument("code", "_Code", "Python expression or block assigning w", "z", GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("x-left", "_X left", "Left bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("x-right", "X _right", "Right bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("y-top", "_Y top", "Top bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("y-bottom", "Y _bottom", "Bottom bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("grid-spacing", "_Grid spacing", "Grid spacing in mapped complex plane", 1.0e-12, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_boolean_argument("checkerboard", "_Checkerboard", "Use checkerboard instead of line grid", False, GObject.ParamFlags.READWRITE)
+        procedure.add_string_argument("code", "_Formula", "Single Python expression for w(z); '^' is accepted as exponent", "z", GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("x-left", "X _left", "Left bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("x-right", "X r_ight", "Right bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("y-top", "Y _top", "Top bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("y-bottom", "Y bo_ttom", "Bottom bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("grid-spacing", "Grid _step", "Grid spacing in mapped complex plane", 1.0e-12, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_boolean_argument("checkerboard", "C_hequerboard", "Use checkerboard instead of line grid", False, GObject.ParamFlags.READWRITE)
         procedure.add_string_argument(
-            "gradient",
-            "_Gradient",
-            "Argument gradient: HSV, grayscale, red-blue, white-black, or comma-separated #RRGGBB stops",
+            "gradient-preset",
+            "_Palette",
+            "Gradient preset: HSV, grayscale, red-blue, white-black, custom",
             "HSV",
             GObject.ParamFlags.READWRITE,
         )
-        procedure.add_boolean_argument("transform-active-layer", "_Transform active layer", "Transform pixels from the active layer", True, GObject.ParamFlags.READWRITE)
-        procedure.add_boolean_argument("create-analysis-layers", "_Create analysis layers", "Create argument/modulus/grid helper layers", True, GObject.ParamFlags.READWRITE)
+        procedure.add_string_argument(
+            "gradient-custom",
+            "Custom p_alette",
+            "Custom gradient stops (#RRGGBB,#RRGGBB,...) used when preset is 'custom'",
+            "#ff0000,#ffff00,#00ff00,#00ffff,#0000ff",
+            GObject.ParamFlags.READWRITE,
+        )
+        procedure.add_string_argument(
+            "abyss-mode",
+            "Abyss _mode",
+            "Outside-sample mode: transparent, black, white, clamp, loop",
+            "transparent",
+            GObject.ParamFlags.READWRITE,
+        )
+        procedure.add_int_argument(
+            "abyss-loop-iterations",
+            "_Wrap iterations",
+            "Maximum wrap iterations in loop abyss mode",
+            1,
+            1024,
+            4,
+            GObject.ParamFlags.READWRITE,
+        )
+        procedure.add_boolean_argument("transform-active-layer", "_Overwrite active layer", "Transform pixels in the active layer directly", True, GObject.ParamFlags.READWRITE)
+        procedure.add_boolean_argument("create-analysis-layers", "Add _analysis layers", "Create argument/modulus/grid helper layers", True, GObject.ParamFlags.READWRITE)
 
         return procedure
 

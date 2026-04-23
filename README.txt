@@ -43,11 +43,10 @@ From the dialogue, you can adjust these parameters:
 `width`, `height`::
 	The dimensions of the new image.
 `code`::
-	The python expression or assignment executed for every pixel.
+	A single python expression executed for every pixel.
 	The variable `z` is provided as the current complex coordinate.
-	If you provide an expression like `z*z` or `2*z + 1`, the plug-in
-	automatically treats it as `w = <expression>`.
-	If you provide an assignment, assign to `w`.
+	Use `^` or `**` for exponentiation (`z^2` and `z**2` both work).
+	Only expressions are accepted (no comments or multi-line statements).
 `x left`, `x-right`::
 	The range of x-values (real parts) which is mapped to the horizontal image axis.
 `y top`, `y bottom`::
@@ -56,16 +55,24 @@ From the dialogue, you can adjust these parameters:
 	The spacing of the generated coordinate grid.
 `checker board`::
 	Use a checker board instead of a grid.
-`gradient`::
-	Gradient used for the `Argument` layer. Supported values are
-	`HSV` (default), `grayscale`, `red-blue`, `white-black`, or a custom
-	comma-separated list of hex stops such as
+`palette`::
+	Gradient preset used for the `Argument` layer.
+	Supported options are `HSV`, `grayscale`, `red-blue`, `white-black`,
+	or `custom`.
+`custom palette`::
+	When `palette` is `custom`, the plug-in opens a dialog where you can
+	enter comma-separated hex stops like
 	`#ff0000,#ffff00,#00ff00,#00ffff,#0000ff`.
+`abyss mode`::
+	Controls out-of-bounds sampling for transformed pixels:
+	`transparent`, `black`, `white`, `clamp`, or `loop`.
+`wrap iterations`::
+	Safety cap for `loop` abyss mode wrap attempts.
 NOTE: The old `constraint` parameter has been removed from the UI.
 Invalid points should be handled directly in your `code` expression.
 
-With `Transform active layer` enabled, the plugin creates a
-`Conformal transform` layer from the active layer.
+With `Overwrite active layer` enabled, the plugin writes the transformed
+pixels directly back to the active layer (no extra transform layer is created).
 If `Create analysis layers` is enabled, it additionally creates:
 
 `Grid`::
@@ -78,7 +85,7 @@ If `Create analysis layers` is enabled, it additionally creates:
 	is used as an index into the default white-black gradient.
 	 
 `Argument`::
-	This layer is coloured by the selected `gradient`
+	This layer is coloured by the selected `palette`
 	at an index corresponding to `arg w`.
 
 The two topmost layers have transparency and layer mode set
@@ -90,12 +97,13 @@ illustrations, or simply beautiful pictures!
 If your formula fails:
 
 * Use valid Python syntax. For example, `2z` is invalid Python; use `2*z`.
-* Mathematical notation like `w = 2z` is not valid Python; write
-  `w = 2*z`.
-* If you enter only an expression (`z*z`, `sin(z)`, etc.), it is
-  treated as `w = <expression>`.
+* Mathematical notation like `2z` is not valid Python; write `2*z`.
+* `^` is accepted for exponentiation and automatically converted to `**`.
+* Comments (`#`), semicolons, and multi-line input are rejected for safety.
 * If you get transparent/black output, start with a simple mapping
   (`z`, `z+1`, `z*z`) and increase complexity incrementally.
+* If transformed pixels fall outside the source bounds, set `abyss mode`
+  to `clamp` or `loop` to reduce transparent regions.
 * The warning about `GLibWin32` typelibs is environment-specific and is
   unrelated to conformal expression parsing.
 
