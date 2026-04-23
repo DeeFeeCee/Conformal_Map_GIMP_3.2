@@ -190,10 +190,18 @@ def _layer_mode(*names):
 def _push_bytes_to_layer(layer, width, height, rgba_bytes):
     buffer = layer.get_buffer()
     rect = Gegl.Rectangle.new(0, 0, width, height)
-    # introspection-friendly overload: set(rect, format, src)
-    buffer.set(rect, "R'G'B'A u8", rgba_bytes)
-    layer.update(0, 0, width, height)
-    layer.flush()
+
+    # GIMP 3 builds may expose different introspection overloads for buffer.set().
+    try:
+        buffer.set(rect, "R'G'B'A u8", rgba_bytes)
+    except TypeError:
+        # Fallback overload: set(rect, rowstride, format, bytes)
+        buffer.set(rect, width * 4, "R'G'B'A u8", rgba_bytes)
+
+    if hasattr(layer, "update"):
+        layer.update(0, 0, width, height)
+    if hasattr(layer, "flush"):
+        layer.flush()
 
 
 def conformal_run(procedure, run_mode, image, drawables, config, data):
