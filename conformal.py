@@ -1,254 +1,312 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 
-#   conformal.py
-#   Copyright (C) 2006-2011  Michael J. Gruber <conformal@drmicha.warpmail.net>
-#
-#    This program is free software; you can redistribute it and/or modify
-#   it under the terms of the GNU General Public License as published by
-#   the Free Software Foundation, version 2 of the License.
-#
-#   This program is distributed in the hope that it will be useful,
-#   but WITHOUT ANY WARRANTY; without even the implied warranty of
-#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#   GNU General Public License for more details.
-#
-#   You should have received a copy of the GNU General Public License
-#   along with this program; if not, write to the Free Software
-#   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+"""Conformal map renderer for GIMP 3.2.
 
-confversion = "0.3+"
+This plug-in ports the original GIMP 2 plug-in to the GIMP 3 API and keeps
+rendering work in pure Python bytearrays before committing a full buffer at
+once, which is significantly faster than per-pixel GIMP API calls.
+"""
 
-# allow access through module and without
-import math, cmath
-from math import *
-from cmath import *
+import cmath
+import math
+import sys
 
-from array import array
-from gimpfu import *
+import gi
 
-# try importing typical math modules
-try:
-	from fpconst import *
-	import scipy.special
-except ImportError:
-	pass
+gi.require_version("Gegl", "0.4")
+gi.require_version("Gimp", "3.0")
+from gi.repository import Gegl
+from gi.repository import Gimp
+from gi.repository import GLib
+from gi.repository import GObject
 
-try:
-	import mpmath
-except ImportError:
-	pass
+CONF_VERSION = "1.0-gimp3"
+PROC_RENDER = "plug-in-conformal-render"
 
-
-def conformal_batch(width, height, code, constraint, xl, xr, yt, yb, grid, checkboard, gradient, filename):
-	conformal_core(width, height, code, constraint, xl, xr, yt, yb, grid, checkboard, gradient, filename)
-
-
-def conformal(width, height, code, constraint, xl, xr, yt, yb, grid, checkboard, gradient):
-	conformal_core(width, height, code, constraint, xl, xr, yt, yb, grid, checkboard, gradient, None)
+# expose math functions to user equations in a controlled namespace
+MATH_NAMESPACE = {
+    "math": math,
+    "cmath": cmath,
+    "complex": complex,
+    "abs": abs,
+    "min": min,
+    "max": max,
+    "pow": pow,
+}
+for _name in dir(math):
+    if not _name.startswith("_"):
+        MATH_NAMESPACE[_name] = getattr(math, _name)
+for _name in dir(cmath):
+    if not _name.startswith("_"):
+        MATH_NAMESPACE[_name] = getattr(cmath, _name)
 
 
-def conformal_core(width, height, code, constraint, xl, xr, yt, yb, grid, checkboard, gradient, filename):
-	image = gimp.Image(width, height, RGB) 
-	drawables = [ gimp.Layer(image, "Argument", width, height, RGBA_IMAGE, 100, NORMAL_MODE),
-		      gimp.Layer(image, "Log. modulus", width, height, RGBA_IMAGE, 35, VALUE_MODE),
-		      gimp.Layer(image, "Grid", width, height, RGBA_IMAGE, 10, DARKEN_ONLY_MODE)]
-	image.disable_undo()
-	l = 1
-	for drawable in drawables:
-		image.add_layer(drawable, l)
-		l = -1
+class ConformalRenderer:
+    """Pixel renderer independent from GIMP glue code."""
 
-	bpp = drawables[0].bpp
+    QUANT = 4096
 
-	gimp.tile_cache_ntiles(2 * (width + 63) / 64)
+    def __init__(self, width, height, code, constraint, xl, xr, yt, yb, grid, checkerboard):
+        self.width = max(1, int(width))
+        self.height = max(1, int(height))
+        self.code = code
+        self.constraint = constraint
+        self.xl = float(xl)
+        self.xr = float(xr)
+        self.yt = float(yt)
+        self.yb = float(yb)
+        self.grid = max(float(grid), 1e-9)
+        self.checkerboard = bool(checkerboard)
 
-	dest_rgns = [ drawable.get_pixel_rgn(0, 0, width, height, True, False) for drawable in drawables ]
-	progress = 0
-	max_progress = width * height
-	if filename is None:
-		gimp.progress_init("Conformally Mapping...")
-	sx = (width-1.0)/(xr-xl)
-	sy = (height-1.0)/(yt-yb)
-	w = complex(0.0)
-	z = complex(0.0)
-	cx, cy = 0, 0
-	mp2 = 2.0*math.pi # no need to do this 500*500 times...
-	ml2 = 2.0*math.log(2) # no need to do this 500*500 times...
-	ml = math.log(2) # no need to do this 500*500 times...
-	compiled=compile(code, "compiled code", "exec", 0, 1)
-	compiledconstraint=compile(constraint, "compiled constraint code", "exec", 0, 1)
+        self._sx = (self.width - 1.0) / (self.xr - self.xl)
+        self._sy = (self.height - 1.0) / (self.yt - self.yb)
+        self._two_pi = 2.0 * math.pi
+        self._log2 = math.log(2.0)
 
-	dests = [ array("B", "\x00" * width*height*bpp) for i in range(3) ]
+        self._compiled_code = compile(self.code, "conformal-code", "exec")
+        self._compiled_constraint = compile(self.constraint, "conformal-constraint", "exec")
 
-	QUANT = 4096
-	args = [ i/(QUANT-1.0) for i in range(QUANT) ]
-	arggradsamples = list(gimp.gradient_get_custom_samples(gradient, args)) + [[0,]*bpp]
-	modgradsamples = list(gimp.gradient_get_custom_samples("Default", args)) + [[0,]*bpp]
-	sqrsamples = [ [0,]*(bpp-1) + [255,], [255,]*(bpp-1) + [255,] , [0,]*bpp ]
-	for col in range(QUANT+1):
-		arggradsamples[col] = [ ((int)(255*arggradsamples[col][i]+0.5)) for i in range(bpp)]
-		modgradsamples[col] = [ ((int)(255*modgradsamples[col][i]+0.5)) for i in range(bpp)]
-	qinf = 1.0 + 1.0/(QUANT-1) # uggely uggely
+    @staticmethod
+    def _clamp_u8(x):
+        return max(0, min(255, int(x)))
 
-	args = [0.0,] * width
-	mods = [0.0,] * width
-	sqrs = [0,] * width
+    def _arg_color(self, arg_norm):
+        """Fast HSV wheel (s=1,v=1) for argument coloring."""
+        h = (arg_norm % 1.0) * 6.0
+        i = int(h)
+        f = h - i
+        p = 0.0
+        q = 1.0 - f
+        t = f
+        if i == 0:
+            r, g, b = 1.0, t, p
+        elif i == 1:
+            r, g, b = q, 1.0, p
+        elif i == 2:
+            r, g, b = p, 1.0, t
+        elif i == 3:
+            r, g, b = p, q, 1.0
+        elif i == 4:
+            r, g, b = t, p, 1.0
+        else:
+            r, g, b = 1.0, p, q
+        return (
+            self._clamp_u8(r * 255.0),
+            self._clamp_u8(g * 255.0),
+            self._clamp_u8(b * 255.0),
+            255,
+        )
 
-	for row in range(0, height):
-		for col in range(0, width):
-			z = col/sx + xl + 1j*( yt - row/sy)
-			p = True
-			try:
-				exec(compiledconstraint)
-			except (OverflowError, ValueError):
-				p = False
-			if not p:
-				w = 0.0
-			else:
-				try:
-					exec(compiled)
-				except (OverflowError, ValueError):
-					p = False
-			if not p or isnan(w) or isinf(w):
-				w = 0.0
+    def _mod_shade(self, mod):
+        shade = self._clamp_u8(mod * 255.0)
+        return (shade, shade, shade, 96)
 
-			try:
-				logw = cmath.log(w)
-				arg = logw.imag
-				if isnan(arg) or isinf(arg):
-					arg = 0.0
-					p = False
-				elif arg < 0.0:
-					arg = arg + mp2
-				mod = ( logw.real/ml ) % 1.0
-				if isnan(mod) or isinf(mod):
-					mod = 0.0
-					p = False
-			except (OverflowError, ValueError):
-				arg = 0.0
-				mod = 0.0
-				p = False
-			arg = arg/mp2
+    def _grid_pixel(self, sqr):
+        if self.checkerboard:
+            v = 255 if sqr else 0
+            return (v, v, v, 80)
+        return (0, 0, 0, 80 if sqr else 0)
 
-			try:
-				sqr = int(w.imag/grid % 2.0) + int(w.real/grid % 2.0)
-				if isnan(sqr) or isinf(sqr):
-					sqr = 0
-					p = False
-			except (OverflowError, ValueError):
-				sqr = 0
-				p = False
+    def render(self, progress_cb=None):
+        arg_data = bytearray(self.width * self.height * 4)
+        mod_data = bytearray(self.width * self.height * 4)
+        grid_data = bytearray(self.width * self.height * 4)
 
-			sqr = sqr % 2
+        max_progress = float(self.width * self.height)
+        progress = 0.0
 
-			if not p:
-				arg = qinf
-				mod = qinf
-				sqr = 2
+        for row in range(self.height):
+            base = row * self.width * 4
+            imag = self.yt - (row / self._sy)
+            for col in range(self.width):
+                z = col / self._sx + self.xl + 1j * imag
+                env = {"z": z, "w": 0j, "p": True}
+                env.update(MATH_NAMESPACE)
 
-			args[col] = arg
-			mods[col] = mod
-			sqrs[col] = sqr
+                try:
+                    exec(self._compiled_constraint, {"__builtins__": {}}, env)
+                except Exception:
+                    env["p"] = False
 
-		dests[0][row*width*bpp : (row+1)*width*bpp] = array("B", [ arggradsamples [int((QUANT-1)*args[col]+0.5)][i] for col in range(0, width) for i in range(bpp) ] )
+                if env.get("p", False):
+                    try:
+                        exec(self._compiled_code, {"__builtins__": {}}, env)
+                    except Exception:
+                        env["p"] = False
 
-		dests[1][row*width*bpp : (row+1)*width*bpp] = array("B", [ modgradsamples[int((QUANT-1)*mods[col]+0.5)][i] for col in range(0, width) for i in range(bpp) ] )
+                w = env.get("w", 0j)
+                valid = env.get("p", False)
 
-		dests[2][row*width*bpp : (row+1)*width*bpp]= array("B", [ sqrsamples[sqrs[col]][i] for col in range(0,width) for i in range(bpp) ] )
-	
-		progress = progress + width 
-		if filename is None:
-			gimp.progress_update(float(progress) / max_progress)
+                try:
+                    valid = valid and not (math.isnan(w.real) or math.isnan(w.imag))
+                    valid = valid and not (math.isinf(w.real) or math.isinf(w.imag))
+                except Exception:
+                    valid = False
 
-	for i in range(3):
-		dest_rgns[i][0:width, 0:height] = dests[i].tostring()
+                if valid:
+                    try:
+                        logw = cmath.log(w)
+                        arg = logw.imag
+                        if arg < 0.0:
+                            arg += self._two_pi
+                        arg_norm = arg / self._two_pi
+                        mod = (logw.real / self._log2) % 1.0
 
-	for drawable in drawables:
-		drawable.flush()
-		drawable.update(0,0,width,height)
-	if not checkboard:
-		pdb.plug_in_edge(image,drawables[2], 10, 0, 0) # amount, WRAP, SOBEL
-		pdb.plug_in_vinvert(image,drawables[2])
-	if image.parasite_find("gimp-comment"):
-		image.parasite.detach("gimp-comment")
-	image.attach_new_parasite("gimp-comment", PARASITE_PERSISTENT, """# conformal %s
-code = \"\"\"
-%s
-\"\"\"
-constraint = \"\"\"
-%s
-\"\"\"
-xl = %f
-xr = %f
-yt = %f
-yb = %f
-grid = %f
-checkboard = %d
-gradient = "%s"
-width = %d
-height = %d
-""" % (confversion, code, constraint, xl, xr, yt, yb, grid, checkboard, gradient, width, height))
-	if filename is None:
-		image.enable_undo()
-		gimp.Display(image)
-		gimp.displays_flush
-	else:
-		if filename.find('.xcf') > 0:
-			pdb.gimp_xcf_save(1, image, drawables[0], filename, filename)
-		else:
-			flat_layer = pdb.gimp_image_flatten(image)
-			pdb.gimp_file_save(image, flat_layer, filename, filename)
+                        sqr = int((w.imag / self.grid) % 2.0) + int((w.real / self.grid) % 2.0)
+                        sqr = sqr % 2
+                    except Exception:
+                        valid = False
+
+                if not valid:
+                    arg_px = (0, 0, 0, 255)
+                    mod_px = (0, 0, 0, 0)
+                    grid_px = (0, 0, 0, 0)
+                else:
+                    arg_px = self._arg_color(arg_norm)
+                    mod_px = self._mod_shade(mod)
+                    grid_px = self._grid_pixel(sqr)
+
+                idx = base + (col * 4)
+                arg_data[idx:idx + 4] = bytes(arg_px)
+                mod_data[idx:idx + 4] = bytes(mod_px)
+                grid_data[idx:idx + 4] = bytes(grid_px)
+
+                progress += 1.0
+
+            if progress_cb is not None:
+                progress_cb(progress / max_progress)
+
+        return bytes(arg_data), bytes(mod_data), bytes(grid_data)
 
 
-register(
-	"conformal_batch",
-	"Colour representation of a conformal map",
-	"Colour representation of a conformal map",
-	"Michael J Gruber",
-	"Michael J Gruber",
-	"2011",
-	"",
-	"",
-	[
-		(PF_INT, "width", "width", 512),
-		(PF_INT, "height", "height", 512),
-		(PF_TEXT, "code", "code", "w=z"),
-		(PF_TEXT, "constraint", "constraint", "p=True"),
-		(PF_FLOAT, "xl", "x left", -1.0),
-		(PF_FLOAT, "xr", "x right", 1.0),
-		(PF_FLOAT, "yt", "y top", 1.0),
-		(PF_FLOAT, "yb", "y bottom", -1.0),
-		(PF_FLOAT, "grid", "grid spacing", 1.0),
-		(PF_BOOL, "checkboard", "checker board grid", 0),
-		(PF_GRADIENT, "gradient", "gradient", "Full saturation spectrum CCW"),
-		(PF_FILE, "file", "file", "out.xcf.bz2"),
-	],
-	[],
-	conformal_batch)
+def _push_bytes_to_layer(layer, width, height, rgba_bytes):
+    buffer = layer.get_buffer()
+    rect = Gegl.Rectangle.new(0, 0, width, height)
+    # introspection-friendly overload: set(rect, format, src)
+    buffer.set(rect, "R'G'B'A u8", rgba_bytes)
+    layer.update(0, 0, width, height)
+    layer.flush()
 
-register(
-	"conformal",
-	"Colour representation of a conformal map",
-	"Colour representation of a conformal map",
-	"Michael J Gruber",
-	"Michael J Gruber",
-	"2012",
-	"<Toolbox>/File/Create/_Conformal ...",
-	"",
-	[
-		(PF_INT, "width", "width", 512),
-		(PF_INT, "height", "height", 512),
-		(PF_TEXT, "code", "code", "w=z"),
-		(PF_TEXT, "constraint", "constraint", "p=True"),
-		(PF_FLOAT, "xl", "x left", -1.0),
-		(PF_FLOAT, "xr", "x right", 1.0),
-		(PF_FLOAT, "yt", "y top", 1.0),
-		(PF_FLOAT, "yb", "y bottom", -1.0),
-		(PF_FLOAT, "grid", "grid spacing", 1.0),
-		(PF_BOOL, "checkboard", "checker board grid", 0),
-		(PF_GRADIENT, "gradient", "gradient", "Full saturation spectrum CCW"),
-	],
-	[],
-	conformal)
 
-main()
+def conformal_run(procedure, run_mode, image, drawables, config, data):
+    width = image.get_width()
+    height = image.get_height()
+
+    code = config.get_property("code")
+    constraint = config.get_property("constraint")
+    xl = config.get_property("x-left")
+    xr = config.get_property("x-right")
+    yt = config.get_property("y-top")
+    yb = config.get_property("y-bottom")
+    grid = config.get_property("grid-spacing")
+    checkerboard = config.get_property("checkerboard")
+
+    renderer = ConformalRenderer(width, height, code, constraint, xl, xr, yt, yb, grid, checkerboard)
+
+    if run_mode == Gimp.RunMode.INTERACTIVE:
+        Gimp.progress_init("Rendering conformal map…")
+
+    arg_pixels, mod_pixels, grid_pixels = renderer.render(
+        progress_cb=(lambda value: Gimp.progress_update(value)) if run_mode == Gimp.RunMode.INTERACTIVE else None
+    )
+
+    image.undo_group_start()
+    try:
+        arg_layer = Gimp.Layer.new(
+            image,
+            "Argument",
+            width,
+            height,
+            Gimp.ImageType.RGBA_IMAGE,
+            100.0,
+            Gimp.LayerMode.NORMAL,
+        )
+        mod_layer = Gimp.Layer.new(
+            image,
+            "Log. modulus",
+            width,
+            height,
+            Gimp.ImageType.RGBA_IMAGE,
+            35.0,
+            Gimp.LayerMode.VALUE,
+        )
+        grid_layer = Gimp.Layer.new(
+            image,
+            "Grid",
+            width,
+            height,
+            1,
+            10.0,
+            Gimp.LayerMode.DARKEN_ONLY,
+        )
+
+        image.insert_layer(arg_layer, None, -1)
+        image.insert_layer(mod_layer, None, -1)
+        image.insert_layer(grid_layer, None, -1)
+
+        _push_bytes_to_layer(arg_layer, width, height, arg_pixels)
+        _push_bytes_to_layer(mod_layer, width, height, mod_pixels)
+        _push_bytes_to_layer(grid_layer, width, height, grid_pixels)
+
+        comment = (
+            f"# conformal {CONF_VERSION}\n"
+            f"code = \"\"\"\n{code}\n\"\"\"\n"
+            f"constraint = \"\"\"\n{constraint}\n\"\"\"\n"
+            f"xl = {xl}\nxr = {xr}\nyt = {yt}\nyb = {yb}\n"
+            f"grid = {grid}\ncheckerboard = {int(checkerboard)}\n"
+            f"width = {width}\nheight = {height}\n"
+        )
+        parasite = Gimp.Parasite.new("gimp-comment", Gimp.PARASITE_PERSISTENT, comment.encode("utf-8"))
+        image.attach_parasite(parasite)
+    finally:
+        image.undo_group_end()
+
+    return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, GLib.Error())
+
+
+class ConformalPlugin(Gimp.PlugIn):
+    def do_query_procedures(self):
+        return [PROC_RENDER]
+
+    def do_create_procedure(self, name):
+        if name != PROC_RENDER:
+            return None
+
+        procedure = Gimp.ImageProcedure.new(
+            self,
+            name,
+            Gimp.PDBProcType.PLUGIN,
+            conformal_run,
+            None,
+        )
+        procedure.set_image_types("*")
+        procedure.set_sensitivity_mask(Gimp.ProcedureSensitivityMask.DRAWABLE | Gimp.ProcedureSensitivityMask.NO_DRAWABLES)
+        procedure.set_menu_label("_Conformal Map (GIMP 3)")
+        procedure.add_menu_path("<Image>/Filters/Render")
+        procedure.set_documentation(
+            "Colour representation of a conformal map",
+            "Renders argument, logarithmic modulus and grid into three layers using the GIMP 3.2 API.",
+            name,
+        )
+        procedure.set_attribution("Michael J Gruber", "Ported for GIMP 3.2", "2026")
+
+        procedure.add_string_argument("code", "Code", "Python expression block assigning w", "w = z", GObject.ParamFlags.READWRITE)
+        procedure.add_string_argument(
+            "constraint",
+            "Constraint",
+            "Python expression block assigning boolean p",
+            "p = True",
+            GObject.ParamFlags.READWRITE,
+        )
+        procedure.add_double_argument("x-left", "X left", "Left bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("x-right", "X right", "Right bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("y-top", "Y top", "Top bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("y-bottom", "Y bottom", "Bottom bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("grid-spacing", "Grid spacing", "Grid spacing in mapped complex plane", 1.0e-12, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_boolean_argument("checkerboard", "Checkerboard", "Use checkerboard instead of line grid", False, GObject.ParamFlags.READWRITE)
+
+        return procedure
+
+
+Gimp.main(ConformalPlugin.__gtype__, sys.argv)
