@@ -67,7 +67,7 @@ From the dialogue, you can adjust these parameters:
 	`#ff0000,#ffff00,#00ff00,#00ffff,#0000ff`.
 `abyss mode`::
 	Controls out-of-bounds sampling for transformed pixels:
-	`transparent`, `black`, `white`, `clamp`, or `loop`.
+	`transparent`, `black`, `white`, `clamp`, `loop`, or `reflect`.
 `wrap iterations`::
 	Safety cap for `loop` abyss mode wrap attempts.
 NOTE: The old `constraint` parameter has been removed from the UI.
@@ -107,7 +107,7 @@ If your formula fails:
 * If you get transparent/black output, start with a simple mapping
   (`z`, `z+1`, `z*z`) and increase complexity incrementally.
 * If transformed pixels fall outside the source bounds, set `abyss mode`
-  to `clamp` or `loop` to reduce transparent regions.
+  to `clamp`, `loop`, or `reflect` to reduce transparent regions.
 * The warning about `GLibWin32` typelibs is environment-specific and is
   unrelated to conformal expression parsing.
 

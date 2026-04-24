@@ -36,7 +36,7 @@ from gi.repository import Gimp
 from gi.repository import GLib
 from gi.repository import GObject
 
-CONF_VERSION = "0.3.4"
+CONF_VERSION = "0.3.5"
 PROC_RENDER = "plug-in-conformal-render"
 _UI_INITIALIZED = False
 
@@ -234,11 +234,18 @@ class ConformalRenderer:
             return (v, v, v, 80)
         return (0, 0, 0, 80 if sqr else 0)
 
+    def _mirror_coord(self, value, size):
+        if size <= 1:
+            return 0
+        period = 2 * size
+        m = value % period
+        return m if m < size else (period - 1) - m
+
     def _evaluate_point(self, z):
-        env = {"z": z, "w": 0j, "p": True}
+        env = {"z": z, "zz": z * z, "w": 0j, "p": True}
         env.update(MATH_NAMESPACE)
         try:
-                exec(self._compiled_constraint, {"__builtins__": {}}, env)
+            exec(self._compiled_constraint, {"__builtins__": {}}, env)
         except Exception:
             env["p"] = False
 
@@ -265,14 +272,17 @@ class ConformalRenderer:
                     arg += self._two_pi
                 arg_norm = arg / self._two_pi
                 mod = (logw.real / self._log2) % 1.0
-                sqr = int((w.imag / self.grid) % 2.0) + int((w.real / self.grid) % 2.0)
+                sqr = int(math.floor(w.imag / self.grid)) + int(math.floor(w.real / self.grid))
                 sqr = sqr % 2
+                x_mod = abs((w.real / self.grid) - round(w.real / self.grid))
+                y_mod = abs((w.imag / self.grid) - round(w.imag / self.grid))
+                grid_line = (x_mod < 0.03) or (y_mod < 0.03)
             except Exception:
                 valid = False
 
         if not valid:
-            return False, 0j, 0.0, 0.0, 0
-        return True, w, arg_norm, mod, sqr
+            return False, 0j, 0.0, 0.0, 0, False
+        return True, w, arg_norm, mod, sqr, grid_line
 
     def _sample_mapped_pixel(self, source_pixels, sx, sy):
         if self.abyss_mode == "clamp":
@@ -287,6 +297,14 @@ class ConformalRenderer:
                     return tuple(source_pixels[sidx:sidx + 4])
                 sx %= self.width
                 sy %= self.height
+            return (0, 0, 0, 0)
+        if self.abyss_mode == "reflect":
+            for _ in range(self.abyss_loop_iterations):
+                if 0 <= sx < self.width and 0 <= sy < self.height:
+                    sidx = (sy * self.width + sx) * 4
+                    return tuple(source_pixels[sidx:sidx + 4])
+                sx = self._mirror_coord(sx, self.width)
+                sy = self._mirror_coord(sy, self.height)
             return (0, 0, 0, 0)
         if self.abyss_mode == "black":
             return (0, 0, 0, 255)
@@ -308,7 +326,7 @@ class ConformalRenderer:
             imag = self.yt - (row / self._sy)
             for col in range(self.width):
                 z = col / self._sx + self.xl + 1j * imag
-                valid, w, arg_norm, mod, sqr = self._evaluate_point(z)
+                valid, w, arg_norm, mod, sqr, grid_line = self._evaluate_point(z)
 
                 if not valid:
                     arg_px = (0, 0, 0, 255)
@@ -318,7 +336,7 @@ class ConformalRenderer:
                 else:
                     arg_px = self._arg_color(arg_norm)
                     mod_px = self._mod_shade(mod)
-                    grid_px = self._grid_pixel(sqr)
+                    grid_px = self._grid_pixel(sqr if self.checkerboard else grid_line)
                     if source_pixels is not None:
                         sx = int(round((w.real - self.xl) * self._sx))
                         sy = int(round((self.yt - w.imag) * self._sy))
@@ -352,7 +370,7 @@ def _layer_mode(*names):
 
 
 def _push_bytes_to_layer(layer, width, height, rgba_bytes):
-    buffer = layer.get_buffer()
+    buffer = layer.get_shadow_buffer() if hasattr(layer, "get_shadow_buffer") else layer.get_buffer()
     rect = Gegl.Rectangle.new(0, 0, width, height)
 
     # GIMP 3 builds may expose different introspection overloads for buffer.set().
@@ -362,6 +380,8 @@ def _push_bytes_to_layer(layer, width, height, rgba_bytes):
         # Fallback overload: set(rect, rowstride, format, bytes)
         buffer.set(rect, width * 4, "R'G'B'A u8", rgba_bytes)
 
+    if hasattr(layer, "merge_shadow"):
+        layer.merge_shadow(True)
     if hasattr(layer, "update"):
         layer.update(0, 0, width, height)
     if hasattr(layer, "flush"):
@@ -411,7 +431,7 @@ def _show_dialog(procedure, config):
     if not _UI_INITIALIZED:
         GimpUi.init(PROC_RENDER)
         _UI_INITIALIZED = True
-    dialog = GimpUi.ProcedureDialog.new(procedure, config, "Conformal Map")
+    dialog = GimpUi.ProcedureDialog.new(procedure, config, "Conformal Map Transform")
     dialog.fill(
         [
             "code",
@@ -420,18 +440,45 @@ def _show_dialog(procedure, config):
             "y-top",
             "y-bottom",
             "grid-spacing",
-            "checkerboard",
             "gradient-preset",
             "gradient-custom",
             "abyss-mode",
             "abyss-loop-iterations",
             "transform-active-layer",
             "create-analysis-layers",
+            "checkerboard",
         ]
     )
+    try:
+        analysis_widget = dialog.get_widget("create-analysis-layers")
+        checker_widget = dialog.get_widget("checkerboard")
+        preset_widget = dialog.get_widget("gradient-preset")
+        custom_widget = dialog.get_widget("gradient-custom")
+        abyss_widget = dialog.get_widget("abyss-mode")
+        abyss_iter_widget = dialog.get_widget("abyss-loop-iterations")
+
+        def _sync_analysis(*_args):
+            checker_widget.set_sensitive(bool(config.get_property("create-analysis-layers")))
+
+        def _sync_palette(*_args):
+            custom_enabled = str(config.get_property("gradient-preset")).strip().lower() == "custom"
+            custom_widget.set_sensitive(custom_enabled)
+
+        def _sync_abyss(*_args):
+            mode = str(config.get_property("abyss-mode")).strip().lower()
+            abyss_iter_widget.set_sensitive(mode in ("loop", "reflect"))
+
+        analysis_widget.connect("toggled", _sync_analysis)
+        preset_widget.connect("changed", _sync_palette)
+        abyss_widget.connect("changed", _sync_abyss)
+        _sync_analysis()
+        _sync_palette()
+        _sync_abyss()
+    except Exception:
+        pass
     accepted = dialog.run()
     dialog.destroy()
-    if accepted and config.get_property("gradient-preset") == "custom":
+    if accepted and str(config.get_property("gradient-preset")).strip().lower() == "custom":
         entry_dialog = Gtk.Dialog(title="Custom gradient", modal=True)
         entry_dialog.add_button("_Cancel", Gtk.ResponseType.CANCEL)
         entry_dialog.add_button("_OK", Gtk.ResponseType.OK)
@@ -594,7 +641,7 @@ class ConformalPlugin(Gimp.PlugIn):
         )
         procedure.set_image_types("*")
         procedure.set_sensitivity_mask(Gimp.ProcedureSensitivityMask.DRAWABLE | Gimp.ProcedureSensitivityMask.NO_DRAWABLES)
-        procedure.set_menu_label("_Conformal Map (GIMP 3)")
+        procedure.set_menu_label("_Conformal Mapping")
         procedure.add_menu_path("<Image>/Filters/Distorts")
         procedure.set_documentation(
             "Distort an existing layer with a conformal map",
@@ -615,11 +662,18 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_double_argument("y-top", "Y _top", "Top bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("y-bottom", "Y bo_ttom", "Bottom bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("grid-spacing", "Grid _step", "Grid spacing in mapped complex plane", 1.0e-12, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_boolean_argument("checkerboard", "C_hequerboard", "Use checkerboard instead of line grid", False, GObject.ParamFlags.READWRITE)
-        procedure.add_string_argument(
+        procedure.add_boolean_argument("checkerboard", "_Checkerboard", "Use checkerboard instead of line grid", False, GObject.ParamFlags.READWRITE)
+        choices_gradient = Gimp.Choice.new()
+        choices_gradient.add("HSV", "HSV", "HSV wheel")
+        choices_gradient.add("grayscale", "Grayscale", "Black to white")
+        choices_gradient.add("red-blue", "Red-Blue", "Red to blue")
+        choices_gradient.add("white-black", "White-Black", "White to black")
+        choices_gradient.add("custom", "Custom…", "Custom hex-stop palette")
+        procedure.add_choice_argument(
             "gradient-preset",
             "_Palette",
-            "Gradient preset: HSV, grayscale, red-blue, white-black, custom",
+            "Gradient preset",
+            choices_gradient,
             "HSV",
             GObject.ParamFlags.READWRITE,
         )
@@ -630,10 +684,18 @@ class ConformalPlugin(Gimp.PlugIn):
             "#ff0000,#ffff00,#00ff00,#00ffff,#0000ff",
             GObject.ParamFlags.READWRITE,
         )
-        procedure.add_string_argument(
+        choices_abyss = Gimp.Choice.new()
+        choices_abyss.add("transparent", "Transparent", "Transparent outside area")
+        choices_abyss.add("black", "Black", "Black outside area")
+        choices_abyss.add("white", "White", "White outside area")
+        choices_abyss.add("clamp", "Clamp", "Clamp to nearest edge pixel")
+        choices_abyss.add("loop", "Loop", "Repeat image in tiles")
+        choices_abyss.add("reflect", "Reflect", "Mirror-repeat image in tiles")
+        procedure.add_choice_argument(
             "abyss-mode",
             "Abyss _mode",
-            "Outside-sample mode: transparent, black, white, clamp, loop",
+            "Outside-sample mode",
+            choices_abyss,
             "transparent",
             GObject.ParamFlags.READWRITE,
         )
