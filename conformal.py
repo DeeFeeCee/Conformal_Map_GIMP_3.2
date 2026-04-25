@@ -37,9 +37,11 @@ from gi.repository import Gimp
 from gi.repository import GLib
 from gi.repository import GObject
 
-CONF_VERSION = "0.3.5"
+CONF_VERSION = "0.3.6"
 PROC_RENDER = "plug-in-conformal-render"
 _UI_INITIALIZED = False
+GRADIENT_ID_MAP = {0: "HSV", 1: "grayscale", 2: "red-blue", 3: "white-black", 4: "custom"}
+ABYSS_ID_MAP = {0: "transparent", 1: "black", 2: "white", 3: "clamp", 4: "loop", 5: "reflect"}
 
 # expose math functions to user equations in a controlled namespace
 MATH_NAMESPACE = {
@@ -371,7 +373,7 @@ def _layer_mode(*names):
 
 
 def _push_bytes_to_layer(layer, width, height, rgba_bytes):
-    buffer = layer.get_shadow_buffer() if hasattr(layer, "get_shadow_buffer") else layer.get_buffer()
+    buffer = layer.get_buffer()
     rect = Gegl.Rectangle.new(0, 0, width, height)
 
     # GIMP 3 builds may expose different introspection overloads for buffer.set().
@@ -381,8 +383,6 @@ def _push_bytes_to_layer(layer, width, height, rgba_bytes):
         # Fallback overload: set(rect, rowstride, format, bytes)
         buffer.set(rect, width * 4, "R'G'B'A u8", rgba_bytes)
 
-    if hasattr(layer, "merge_shadow"):
-        layer.merge_shadow(True)
     if hasattr(layer, "update"):
         layer.update(0, 0, width, height)
     if hasattr(layer, "flush"):
@@ -404,8 +404,12 @@ def _drawable_pixels_rgba(drawable, width, height):
     rect = Gegl.Rectangle.new(0, 0, width, height)
     try:
         raw = buffer.get(rect, 1.0, "R'G'B'A u8", Gegl.AbyssPolicy.NONE)
+        if hasattr(raw, "get_data"):
+            raw = raw.get_data()
         if raw is not None:
-            return bytes(raw)
+            raw_bytes = bytes(raw)
+            if len(raw_bytes) == width * height * 4:
+                return raw_bytes
     except Exception:
         pass
 
@@ -462,11 +466,17 @@ def _show_dialog(procedure, config):
             checker_widget.set_sensitive(bool(config.get_property("create-analysis-layers")))
 
         def _sync_palette(*_args):
-            custom_enabled = str(config.get_property("gradient-preset")).strip().lower() == "custom"
+            preset_val = config.get_property("gradient-preset")
+            if isinstance(preset_val, int):
+                preset_val = GRADIENT_ID_MAP.get(preset_val, "HSV")
+            custom_enabled = str(preset_val).strip().lower() == "custom"
             custom_widget.set_sensitive(custom_enabled)
 
         def _sync_abyss(*_args):
-            mode = str(config.get_property("abyss-mode")).strip().lower()
+            mode = config.get_property("abyss-mode")
+            if isinstance(mode, int):
+                mode = ABYSS_ID_MAP.get(mode, "transparent")
+            mode = str(mode).strip().lower()
             abyss_iter_widget.set_sensitive(mode in ("loop", "reflect"))
 
         analysis_widget.connect("toggled", _sync_analysis)
@@ -479,7 +489,10 @@ def _show_dialog(procedure, config):
         pass
     accepted = dialog.run()
     dialog.destroy()
-    if accepted and str(config.get_property("gradient-preset")).strip().lower() == "custom":
+    gradient_preset_val = config.get_property("gradient-preset")
+    if isinstance(gradient_preset_val, int):
+        gradient_preset_val = GRADIENT_ID_MAP.get(gradient_preset_val, "HSV")
+    if accepted and str(gradient_preset_val).strip().lower() == "custom":
         entry_dialog = Gtk.Dialog(title="Custom gradient", modal=True)
         entry_dialog.add_button("_Cancel", Gtk.ResponseType.CANCEL)
         entry_dialog.add_button("_OK", Gtk.ResponseType.OK)
@@ -513,8 +526,12 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     checkerboard = config.get_property("checkerboard")
     gradient_preset = config.get_property("gradient-preset")
     gradient_custom = config.get_property("gradient-custom")
-    gradient = gradient_custom if gradient_preset == "custom" else gradient_preset
+    if isinstance(gradient_preset, int):
+        gradient_preset = GRADIENT_ID_MAP.get(gradient_preset, "HSV")
+    gradient = gradient_custom if str(gradient_preset).strip().lower() == "custom" else gradient_preset
     abyss_mode = config.get_property("abyss-mode")
+    if isinstance(abyss_mode, int):
+        abyss_mode = ABYSS_ID_MAP.get(abyss_mode, "transparent")
     abyss_loop_iterations = config.get_property("abyss-loop-iterations")
     transform_layer = config.get_property("transform-active-layer")
     create_analysis = config.get_property("create-analysis-layers")
@@ -532,8 +549,12 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         checkerboard = config.get_property("checkerboard")
         gradient_preset = config.get_property("gradient-preset")
         gradient_custom = config.get_property("gradient-custom")
-        gradient = gradient_custom if gradient_preset == "custom" else gradient_preset
+        if isinstance(gradient_preset, int):
+            gradient_preset = GRADIENT_ID_MAP.get(gradient_preset, "HSV")
+        gradient = gradient_custom if str(gradient_preset).strip().lower() == "custom" else gradient_preset
         abyss_mode = config.get_property("abyss-mode")
+        if isinstance(abyss_mode, int):
+            abyss_mode = ABYSS_ID_MAP.get(abyss_mode, "transparent")
         abyss_loop_iterations = config.get_property("abyss-loop-iterations")
         transform_layer = config.get_property("transform-active-layer")
         create_analysis = config.get_property("create-analysis-layers")
@@ -709,7 +730,7 @@ class ConformalPlugin(Gimp.PlugIn):
             4,
             GObject.ParamFlags.READWRITE,
         )
-        procedure.add_boolean_argument("transform-active-layer", "_Overwrite active layer", "Transform pixels in the active layer directly", True, GObject.ParamFlags.READWRITE)
+        procedure.add_boolean_argument("transform-active-layer", "_Transform active layer", "Transform pixels in the active layer directly", True, GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("create-analysis-layers", "Add _analysis layers", "Create argument/modulus/grid helper layers", True, GObject.ParamFlags.READWRITE)
 
         return procedure

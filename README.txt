@@ -73,7 +73,7 @@ From the dialogue, you can adjust these parameters:
 NOTE: The old `constraint` parameter has been removed from the UI.
 Invalid points should be handled directly in your `code` expression.
 
-With `Overwrite active layer` enabled, the plugin writes the transformed
+With `Transform active layer` enabled, the plugin writes the transformed
 pixels directly back to the active layer (no extra transform layer is created).
 If `Create analysis layers` is enabled, it additionally creates:
 
