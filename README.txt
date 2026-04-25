@@ -47,6 +47,7 @@ From the dialogue, you can adjust these parameters:
 	The variable `z` is provided as the current complex coordinate.
 	Assign the mapped value to `w`.
 	You can use multi-line code, helper functions, and recursive calls.
+	Implicit multiplication like `2z` is accepted as `2*z`.
 	Use `^` or `**` for exponentiation (`z^2` and `z**2` both work).
 	The symbol `i` is interpreted as Python's imaginary unit `j`.
 `x left`, `x-right`::
@@ -62,8 +63,8 @@ From the dialogue, you can adjust these parameters:
 	Supported options are `HSV`, `grayscale`, `red-blue`, `white-black`,
 	or `custom`.
 `custom palette`::
-	When `palette` is `custom`, the plug-in opens a dialog where you can
-	enter comma-separated hex stops like
+	When `palette` is `custom`, edit the `custom palette` text field with
+	comma-separated hex stops like
 	`#ff0000,#ffff00,#00ff00,#00ffff,#0000ff`.
 `abyss mode`::
 	Controls out-of-bounds sampling for transformed pixels:
@@ -100,10 +101,13 @@ If your formula fails:
 
 * Use valid Python syntax. For example, `2z` is invalid Python; use `2*z`.
 * Mathematical notation like `2z` is not valid Python; write `2*z`.
+  (The plug-in now auto-corrects common `2z` style terms.)
 * `^` is accepted for exponentiation and automatically converted to `**`.
 * `i` is accepted as the imaginary unit and converted to `j`.
 * Helper functions and recursive expressions are supported as long as
   the final code assigns `w`.
+* Invalid palette or formula syntax now aborts rendering and shows a
+  plug-in error message in GIMP.
 * If you get transparent/black output, start with a simple mapping
   (`z`, `z+1`, `z*z`) and increase complexity incrementally.
 * If transformed pixels fall outside the source bounds, set `abyss mode`

@@ -95,6 +95,7 @@ class ConformalRenderer:
         self.gradient = gradient or "HSV"
         self.abyss_mode = (abyss_mode or "transparent").strip().lower()
         self.abyss_loop_iterations = max(1, int(abyss_loop_iterations))
+        self._validate_gradient_setting()
 
         self._sx = (self.width - 1.0) / (self.xr - self.xl)
         self._sy = (self.height - 1.0) / (self.yt - self.yb)
@@ -111,6 +112,8 @@ class ConformalRenderer:
             return "w = z"
         # Map common math notation to Python.
         snippet = snippet.replace("^", "**")
+        # Allow shorthand multiplication like 2z -> 2*z.
+        snippet = re.sub(r"(\d+(?:\.\d+)?)(\s*)(z)\b", r"\1*\3", snippet)
         # Interpret "i" as the imaginary unit, including forms like 0.2i.
         snippet = re.sub(r"(?<=\d)i\b", "j", snippet)
         snippet = re.sub(r"\bi\b", "(1j)", snippet)
@@ -155,6 +158,19 @@ class ConformalRenderer:
     @staticmethod
     def _clamp_u8(x):
         return max(0, min(255, int(x)))
+
+    def _validate_gradient_setting(self):
+        gradient_name = str(self.gradient).strip().lower()
+        if gradient_name in ("hsv", "grayscale", "red-blue", "white-black"):
+            return
+        if "," in str(self.gradient):
+            stops = [token for token in str(self.gradient).split(",") if token.strip()]
+            if len(stops) < 2:
+                raise ValueError("Custom palette needs at least 2 hex stops.")
+            for token in stops:
+                self._parse_hex_color(token)
+            return
+        raise ValueError(f"Unknown gradient preset '{self.gradient}'.")
 
     @staticmethod
     def _parse_hex_color(token):
@@ -288,27 +304,26 @@ class ConformalRenderer:
         return True, w, arg_norm, mod, sqr, grid_line
 
     def _sample_mapped_pixel(self, source_pixels, sx, sy):
+        tile_x = 0 if 0 <= sx < self.width else (abs(sx) // self.width + 1 if sx < 0 else sx // self.width)
+        tile_y = 0 if 0 <= sy < self.height else (abs(sy) // self.height + 1 if sy < 0 else sy // self.height)
+        if max(tile_x, tile_y) > self.abyss_loop_iterations:
+            return (0, 0, 0, 0)
+
         if self.abyss_mode == "clamp":
             sx = min(max(0, sx), self.width - 1)
             sy = min(max(0, sy), self.height - 1)
             sidx = (sy * self.width + sx) * 4
             return tuple(source_pixels[sidx:sidx + 4])
         if self.abyss_mode == "loop":
-            for _ in range(self.abyss_loop_iterations):
-                if 0 <= sx < self.width and 0 <= sy < self.height:
-                    sidx = (sy * self.width + sx) * 4
-                    return tuple(source_pixels[sidx:sidx + 4])
-                sx %= self.width
-                sy %= self.height
-            return (0, 0, 0, 0)
+            sx %= self.width
+            sy %= self.height
+            sidx = (sy * self.width + sx) * 4
+            return tuple(source_pixels[sidx:sidx + 4])
         if self.abyss_mode == "reflect":
-            for _ in range(self.abyss_loop_iterations):
-                if 0 <= sx < self.width and 0 <= sy < self.height:
-                    sidx = (sy * self.width + sx) * 4
-                    return tuple(source_pixels[sidx:sidx + 4])
-                sx = self._mirror_coord(sx, self.width)
-                sy = self._mirror_coord(sy, self.height)
-            return (0, 0, 0, 0)
+            sx = self._mirror_coord(sx, self.width)
+            sy = self._mirror_coord(sy, self.height)
+            sidx = (sy * self.width + sx) * 4
+            return tuple(source_pixels[sidx:sidx + 4])
         if self.abyss_mode == "black":
             return (0, 0, 0, 255)
         if self.abyss_mode == "white":
@@ -492,24 +507,12 @@ def _show_dialog(procedure, config):
     gradient_preset_val = config.get_property("gradient-preset")
     if isinstance(gradient_preset_val, int):
         gradient_preset_val = GRADIENT_ID_MAP.get(gradient_preset_val, "HSV")
-    if accepted and str(gradient_preset_val).strip().lower() == "custom":
-        entry_dialog = Gtk.Dialog(title="Custom gradient", modal=True)
-        entry_dialog.add_button("_Cancel", Gtk.ResponseType.CANCEL)
-        entry_dialog.add_button("_OK", Gtk.ResponseType.OK)
-        box = entry_dialog.get_content_area()
-        label = Gtk.Label(label="Enter comma-separated hex stops (#RRGGBB,#RRGGBB,...)")
-        entry = Gtk.Entry()
-        entry.set_text(config.get_property("gradient-custom"))
-        box.add(label)
-        box.add(entry)
-        entry_dialog.show_all()
-        response = entry_dialog.run()
-        if response == Gtk.ResponseType.OK:
-            config.set_property("gradient-custom", entry.get_text())
-        else:
-            accepted = False
-        entry_dialog.destroy()
     return accepted
+
+
+def range_estimate_settings(value, lower, upper, digits=5):
+    bounded = min(max(float(value), float(lower)), float(upper))
+    return round(bounded, int(digits))
 
 
 def conformal_run(procedure, run_mode, image, drawables, config, data):
@@ -559,31 +562,45 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         transform_layer = config.get_property("transform-active-layer")
         create_analysis = config.get_property("create-analysis-layers")
 
-    renderer = ConformalRenderer(
-        width,
-        height,
-        code,
-        constraint,
-        xl,
-        xr,
-        yt,
-        yb,
-        grid,
-        checkerboard,
-        gradient,
-        abyss_mode,
-        abyss_loop_iterations,
-    )
+    xl = range_estimate_settings(xl, -1.0e9, 1.0e9, digits=5)
+    xr = range_estimate_settings(xr, -1.0e9, 1.0e9, digits=5)
+    yt = range_estimate_settings(yt, -1.0e9, 1.0e9, digits=5)
+    yb = range_estimate_settings(yb, -1.0e9, 1.0e9, digits=5)
+    grid = range_estimate_settings(grid, 1.0e-12, 1.0e9, digits=5)
+
+    try:
+        renderer = ConformalRenderer(
+            width,
+            height,
+            code,
+            constraint,
+            xl,
+            xr,
+            yt,
+            yb,
+            grid,
+            checkerboard,
+            gradient,
+            abyss_mode,
+            abyss_loop_iterations,
+        )
+    except Exception as exc:
+        Gimp.message(f"Conformal Mapping input error: {exc}")
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
     source = drawables[0] if drawables else image.get_active_layer()
     source_pixels = _drawable_pixels_rgba(source, width, height) if (transform_layer and source is not None) else None
 
     if run_mode == Gimp.RunMode.INTERACTIVE:
         Gimp.progress_init("Rendering conformal map…")
 
-    arg_pixels, mod_pixels, grid_pixels, mapped_pixels = renderer.render(
-        source_pixels=source_pixels,
-        progress_cb=(lambda value: Gimp.progress_update(value)) if run_mode == Gimp.RunMode.INTERACTIVE else None
-    )
+    try:
+        arg_pixels, mod_pixels, grid_pixels, mapped_pixels = renderer.render(
+            source_pixels=source_pixels,
+            progress_cb=(lambda value: Gimp.progress_update(value)) if run_mode == Gimp.RunMode.INTERACTIVE else None
+        )
+    except Exception as exc:
+        Gimp.message(f"Conformal Mapping render error: {exc}")
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
 
     image.undo_group_start()
     try:
