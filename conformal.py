@@ -26,6 +26,7 @@ import math
 import ast
 import re
 import sys
+from gettext import gettext as _
 
 import gi
 
@@ -664,11 +665,11 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_double_argument("grid-spacing", "Grid _step", "Grid spacing in mapped complex plane", 1.0e-12, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("checkerboard", "_Checkerboard", "Use checkerboard instead of line grid", False, GObject.ParamFlags.READWRITE)
         choices_gradient = Gimp.Choice.new()
-        choices_gradient.add("HSV", "HSV", "HSV wheel", "HSV")
-        choices_gradient.add("grayscale", "Grayscale", "Black to white", "grayscale")
-        choices_gradient.add("red-blue", "Red-Blue", "Red to blue", "red-blue")
-        choices_gradient.add("white-black", "White-Black", "White to black", "white-black")
-        choices_gradient.add("custom", "Custom…", "Custom hex-stop palette", "custom")
+        choices_gradient.add("HSV", 0, _("HSV"), "HSV wheel")
+        choices_gradient.add("grayscale", 1, _("Grayscale"), "Black to white")
+        choices_gradient.add("red-blue", 2, _("Red-Blue"), "Red to blue")
+        choices_gradient.add("white-black", 3, _("White-Black"), "White to black")
+        choices_gradient.add("custom", 4, _("Custom…"), "Custom hex-stop palette")
         procedure.add_choice_argument(
             "gradient-preset",
             "_Palette",
@@ -685,12 +686,12 @@ class ConformalPlugin(Gimp.PlugIn):
             GObject.ParamFlags.READWRITE,
         )
         choices_abyss = Gimp.Choice.new()
-        choices_abyss.add("transparent", "Transparent", "Transparent outside area", "transparent")
-        choices_abyss.add("black", "Black", "Black outside area", "black")
-        choices_abyss.add("white", "White", "White outside area", "white")
-        choices_abyss.add("clamp", "Clamp", "Clamp to nearest edge pixel", "clamp")
-        choices_abyss.add("loop", "Loop", "Repeat image in tiles", "loop")
-        choices_abyss.add("reflect", "Reflect", "Mirror-repeat image in tiles", "reflect")
+        choices_abyss.add("transparent", 0, _("Transparent"), "Transparent outside area")
+        choices_abyss.add("black", 1, _("Black"), "Black outside area")
+        choices_abyss.add("white", 2, _("White"), "White outside area")
+        choices_abyss.add("clamp", 3, _("Clamp"), "Clamp to nearest edge pixel")
+        choices_abyss.add("loop", 4, _("Loop"), "Repeat image in tiles")
+        choices_abyss.add("reflect", 5, _("Reflect"), "Mirror-repeat image in tiles")
         procedure.add_choice_argument(
             "abyss-mode",
             "Abyss _mode",
