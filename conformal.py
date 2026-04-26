@@ -37,7 +37,7 @@ from gi.repository import Gimp
 from gi.repository import GLib
 from gi.repository import GObject
 
-CONF_VERSION = "0.3.6"
+CONF_VERSION = "0.3.7"
 PROC_RENDER = "plug-in-conformal-render"
 _UI_INITIALIZED = False
 GRADIENT_ID_MAP = {0: "HSV", 1: "grayscale", 2: "red-blue", 3: "white-black", 4: "custom"}
@@ -388,7 +388,8 @@ def _layer_mode(*names):
 
 
 def _push_bytes_to_layer(layer, width, height, rgba_bytes):
-    buffer = layer.get_buffer()
+    shadow_buffer = layer.get_shadow_buffer() if hasattr(layer, "get_shadow_buffer") else None
+    buffer = shadow_buffer if shadow_buffer is not None else layer.get_buffer()
     rect = Gegl.Rectangle.new(0, 0, width, height)
 
     # GIMP 3 builds may expose different introspection overloads for buffer.set().
@@ -398,6 +399,8 @@ def _push_bytes_to_layer(layer, width, height, rgba_bytes):
         # Fallback overload: set(rect, rowstride, format, bytes)
         buffer.set(rect, width * 4, "R'G'B'A u8", rgba_bytes)
 
+    if shadow_buffer is not None and hasattr(layer, "merge_shadow"):
+        layer.merge_shadow(True)
     if hasattr(layer, "update"):
         layer.update(0, 0, width, height)
     if hasattr(layer, "flush"):
@@ -443,9 +446,7 @@ def _drawable_pixels_rgba(drawable, width, height):
 
 def _show_dialog(procedure, config):
     gi.require_version("GimpUi", "3.0")
-    gi.require_version("Gtk", "3.0")
     from gi.repository import GimpUi
-    from gi.repository import Gtk
 
     global _UI_INITIALIZED
     if not _UI_INITIALIZED:
@@ -469,50 +470,30 @@ def _show_dialog(procedure, config):
             "checkerboard",
         ]
     )
-    try:
-        analysis_widget = dialog.get_widget("create-analysis-layers")
-        checker_widget = dialog.get_widget("checkerboard")
-        preset_widget = dialog.get_widget("gradient-preset")
-        custom_widget = dialog.get_widget("gradient-custom")
-        abyss_widget = dialog.get_widget("abyss-mode")
-        abyss_iter_widget = dialog.get_widget("abyss-loop-iterations")
+    dialog.set_sensitive("checkerboard", config, "create-analysis-layers", False)
+    dialog.set_sensitive_if_in("gradient-custom", config, "gradient-preset", ["custom", 4], False)
+    dialog.set_sensitive_if_in("abyss-loop-iterations", config, "abyss-mode", ["loop", "reflect", 4, 5], False)
 
-        def _sync_analysis(*_args):
-            checker_widget.set_sensitive(bool(config.get_property("create-analysis-layers")))
+    def _apply_range_estimate(property_name, lower, upper):
+        try:
+            step, page, _digits = Gimp.range_estimate_settings(lower, upper)
+        except Exception:
+            step, page = 0.1, 1.0
+        widget = dialog.get_widget(property_name)
+        if widget is not None:
+            if hasattr(widget, "set_increments"):
+                widget.set_increments(step, page)
+            if hasattr(widget, "set_digits"):
+                widget.set_digits(5)
 
-        def _sync_palette(*_args):
-            preset_val = config.get_property("gradient-preset")
-            if isinstance(preset_val, int):
-                preset_val = GRADIENT_ID_MAP.get(preset_val, "HSV")
-            custom_enabled = str(preset_val).strip().lower() == "custom"
-            custom_widget.set_sensitive(custom_enabled)
-
-        def _sync_abyss(*_args):
-            mode = config.get_property("abyss-mode")
-            if isinstance(mode, int):
-                mode = ABYSS_ID_MAP.get(mode, "transparent")
-            mode = str(mode).strip().lower()
-            abyss_iter_widget.set_sensitive(mode in ("loop", "reflect"))
-
-        analysis_widget.connect("toggled", _sync_analysis)
-        preset_widget.connect("changed", _sync_palette)
-        abyss_widget.connect("changed", _sync_abyss)
-        _sync_analysis()
-        _sync_palette()
-        _sync_abyss()
-    except Exception:
-        pass
+    _apply_range_estimate("x-left", -1.0e9, 1.0e9)
+    _apply_range_estimate("x-right", -1.0e9, 1.0e9)
+    _apply_range_estimate("y-top", -1.0e9, 1.0e9)
+    _apply_range_estimate("y-bottom", -1.0e9, 1.0e9)
+    _apply_range_estimate("grid-spacing", 1.0e-12, 1.0e9)
     accepted = dialog.run()
     dialog.destroy()
-    gradient_preset_val = config.get_property("gradient-preset")
-    if isinstance(gradient_preset_val, int):
-        gradient_preset_val = GRADIENT_ID_MAP.get(gradient_preset_val, "HSV")
     return accepted
-
-
-def range_estimate_settings(value, lower, upper, digits=5):
-    bounded = min(max(float(value), float(lower)), float(upper))
-    return round(bounded, int(digits))
 
 
 def conformal_run(procedure, run_mode, image, drawables, config, data):
@@ -561,12 +542,6 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         abyss_loop_iterations = config.get_property("abyss-loop-iterations")
         transform_layer = config.get_property("transform-active-layer")
         create_analysis = config.get_property("create-analysis-layers")
-
-    xl = range_estimate_settings(xl, -1.0e9, 1.0e9, digits=5)
-    xr = range_estimate_settings(xr, -1.0e9, 1.0e9, digits=5)
-    yt = range_estimate_settings(yt, -1.0e9, 1.0e9, digits=5)
-    yb = range_estimate_settings(yb, -1.0e9, 1.0e9, digits=5)
-    grid = range_estimate_settings(grid, 1.0e-12, 1.0e9, digits=5)
 
     try:
         renderer = ConformalRenderer(
