@@ -446,52 +446,143 @@ def _drawable_pixels_rgba(drawable, width, height):
 
 def _show_dialog(procedure, config):
     gi.require_version("GimpUi", "3.0")
+    gi.require_version("Gtk", "3.0")
     from gi.repository import GimpUi
+    from gi.repository import Gtk
+    from gi.repository import Gdk
 
     global _UI_INITIALIZED
     if not _UI_INITIALIZED:
         GimpUi.init(PROC_RENDER)
         _UI_INITIALIZED = True
-    dialog = GimpUi.ProcedureDialog.new(procedure, config, "Conformal Map Transform")
-    dialog.fill(
-        [
-            "code",
-            "x-left",
-            "x-right",
-            "y-top",
-            "y-bottom",
-            "grid-spacing",
-            "gradient-preset",
-            "gradient-custom",
-            "abyss-mode",
-            "abyss-loop-iterations",
-            "transform-active-layer",
-            "create-analysis-layers",
-            "checkerboard",
-        ]
-    )
-    dialog.set_sensitive("checkerboard", config, "create-analysis-layers", False)
-    dialog.set_sensitive_if_in("gradient-custom", config, "gradient-preset", ["custom", 4], False)
-    dialog.set_sensitive_if_in("abyss-loop-iterations", config, "abyss-mode", ["loop", "reflect", 4, 5], False)
 
-    def _apply_range_estimate(property_name, lower, upper):
-        try:
-            step, page, _digits = Gimp.range_estimate_settings(lower, upper)
-        except Exception:
-            step, page = 0.1, 1.0
-        widget = dialog.get_widget(property_name)
-        if widget is not None:
-            if hasattr(widget, "set_increments"):
-                widget.set_increments(step, page)
-            if hasattr(widget, "set_digits"):
-                widget.set_digits(5)
+    dialog = Gtk.Dialog(title="Conformal Map Transform", modal=True)
+    dialog.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+    dialog.add_button("_OK", Gtk.ResponseType.OK)
+    dialog.set_default_size(760, 560)
+    area = dialog.get_content_area()
+    grid = Gtk.Grid(column_spacing=8, row_spacing=8, margin=8)
+    area.add(grid)
 
-    _apply_range_estimate("x-left", -1.0e9, 1.0e9)
-    _apply_range_estimate("x-right", -1.0e9, 1.0e9)
-    _apply_range_estimate("y-top", -1.0e9, 1.0e9)
-    _apply_range_estimate("y-bottom", -1.0e9, 1.0e9)
-    _apply_range_estimate("grid-spacing", 1.0e-12, 1.0e9)
-    accepted = dialog.run()
+    row = 0
+    code_label = Gtk.Label(label="Formula")
+    code_label.set_xalign(0.0)
+    grid.attach(code_label, 0, row, 1, 1)
+    code_view = Gtk.TextView()
+    code_view.set_monospace(True)
+    code_buffer = code_view.get_buffer()
+    code_buffer.set_text(config.get_property("code"))
+    sw = Gtk.ScrolledWindow()
+    sw.set_min_content_height(120)
+    sw.add(code_view)
+    grid.attach(sw, 1, row, 3, 1)
+    row += 1
+
+    scale_widgets = {}
+
+    def _make_scale(name, label_text, lower, upper, value, step):
+        nonlocal row
+        label = Gtk.Label(label=label_text)
+        label.set_xalign(0.0)
+        grid.attach(label, 0, row, 1, 1)
+        adj = Gtk.Adjustment(value=float(value), lower=float(lower), upper=float(upper), step_increment=float(step), page_increment=float(step) * 10.0, page_size=0.0)
+        scale = Gtk.Scale.new(Gtk.Orientation.HORIZONTAL, adj)
+        scale.set_digits(5)
+        scale.set_draw_value(True)
+        scale.set_hexpand(True)
+        grid.attach(scale, 1, row, 3, 1)
+        scale_widgets[name] = scale
+        row += 1
+
+    _make_scale("x-left", "X left", -1.0e9, 1.0e9, config.get_property("x-left"), 0.00001)
+    _make_scale("x-right", "X right", -1.0e9, 1.0e9, config.get_property("x-right"), 0.00001)
+    _make_scale("y-top", "Y top", -1.0e9, 1.0e9, config.get_property("y-top"), 0.00001)
+    _make_scale("y-bottom", "Y bottom", -1.0e9, 1.0e9, config.get_property("y-bottom"), 0.00001)
+    _make_scale("grid-spacing", "Grid step", 1.0e-12, 1.0e9, config.get_property("grid-spacing"), 0.00001)
+
+    gradient_combo = Gtk.ComboBoxText()
+    for key, label in [("HSV", "HSV"), ("grayscale", "Grayscale"), ("red-blue", "Red-Blue"), ("white-black", "White-Black"), ("custom", "Custom")]:
+        gradient_combo.append(key, label)
+    gradient_value = config.get_property("gradient-preset")
+    gradient_value = GRADIENT_ID_MAP.get(gradient_value, "HSV") if isinstance(gradient_value, int) else str(gradient_value)
+    gradient_combo.set_active_id(gradient_value)
+    grid.attach(Gtk.Label(label="Palette", xalign=0.0), 0, row, 1, 1)
+    grid.attach(gradient_combo, 1, row, 1, 1)
+
+    gradient_entry = Gtk.Entry()
+    gradient_entry.set_text(config.get_property("gradient-custom"))
+    grid.attach(Gtk.Label(label="Custom palette", xalign=0.0), 2, row, 1, 1)
+    grid.attach(gradient_entry, 3, row, 1, 1)
+    row += 1
+
+    def _pick_color(_button):
+        chooser = Gtk.ColorChooserDialog(title="Pick color", transient_for=dialog, modal=True)
+        chooser.set_use_alpha(False)
+        if chooser.run() == Gtk.ResponseType.OK:
+            rgba = chooser.get_rgba()
+            hex_value = "#{:02x}{:02x}{:02x}".format(int(rgba.red * 255), int(rgba.green * 255), int(rgba.blue * 255))
+            current = gradient_entry.get_text().strip()
+            gradient_entry.set_text(f"{current},{hex_value}" if current else hex_value)
+        chooser.destroy()
+
+    pick_btn = Gtk.Button(label="Pick color…")
+    pick_btn.connect("clicked", _pick_color)
+    grid.attach(Gtk.Label(), 2, row, 1, 1)
+    grid.attach(pick_btn, 3, row, 1, 1)
+    row += 1
+
+    abyss_combo = Gtk.ComboBoxText()
+    for key, label in [("transparent", "Transparent"), ("black", "Black"), ("white", "White"), ("clamp", "Clamp"), ("loop", "Loop"), ("reflect", "Reflect")]:
+        abyss_combo.append(key, label)
+    abyss_value = config.get_property("abyss-mode")
+    abyss_value = ABYSS_ID_MAP.get(abyss_value, "transparent") if isinstance(abyss_value, int) else str(abyss_value)
+    abyss_combo.set_active_id(abyss_value)
+    grid.attach(Gtk.Label(label="Abyss mode", xalign=0.0), 0, row, 1, 1)
+    grid.attach(abyss_combo, 1, row, 1, 1)
+
+    abyss_spin = Gtk.SpinButton()
+    abyss_spin.set_adjustment(Gtk.Adjustment(value=float(config.get_property("abyss-loop-iterations")), lower=1.0, upper=1024.0, step_increment=1.0, page_increment=10.0, page_size=0.0))
+    grid.attach(Gtk.Label(label="Wrap iterations", xalign=0.0), 2, row, 1, 1)
+    grid.attach(abyss_spin, 3, row, 1, 1)
+    row += 1
+
+    transform_check = Gtk.CheckButton(label="Transform active layer")
+    transform_check.set_active(bool(config.get_property("transform-active-layer")))
+    analysis_check = Gtk.CheckButton(label="Add analysis layers")
+    analysis_check.set_active(bool(config.get_property("create-analysis-layers")))
+    checker_check = Gtk.CheckButton(label="Checkerboard")
+    checker_check.set_active(bool(config.get_property("checkerboard")))
+    grid.attach(transform_check, 0, row, 2, 1)
+    grid.attach(analysis_check, 2, row, 2, 1)
+    row += 1
+    grid.attach(checker_check, 2, row, 2, 1)
+
+    def _sync():
+        checker_check.set_sensitive(analysis_check.get_active())
+        gradient_entry.set_sensitive(gradient_combo.get_active_id() == "custom")
+        pick_btn.set_sensitive(gradient_combo.get_active_id() == "custom")
+        abyss_spin.set_sensitive(abyss_combo.get_active_id() in ("loop", "reflect"))
+
+    analysis_check.connect("toggled", lambda *_a: _sync())
+    gradient_combo.connect("changed", lambda *_a: _sync())
+    abyss_combo.connect("changed", lambda *_a: _sync())
+    _sync()
+
+    dialog.show_all()
+    accepted = dialog.run() == Gtk.ResponseType.OK
+    if accepted:
+        start = code_buffer.get_start_iter()
+        end = code_buffer.get_end_iter()
+        config.set_property("code", code_buffer.get_text(start, end, True))
+        for name, scale in scale_widgets.items():
+            config.set_property(name, float(scale.get_value()))
+        config.set_property("gradient-preset", gradient_combo.get_active_id() or "HSV")
+        config.set_property("gradient-custom", gradient_entry.get_text().strip())
+        config.set_property("abyss-mode", abyss_combo.get_active_id() or "transparent")
+        config.set_property("abyss-loop-iterations", int(abyss_spin.get_value_as_int()))
+        config.set_property("transform-active-layer", bool(transform_check.get_active()))
+        config.set_property("create-analysis-layers", bool(analysis_check.get_active()))
+        config.set_property("checkerboard", bool(checker_check.get_active()))
     dialog.destroy()
     return accepted
 
@@ -579,8 +670,18 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
 
     image.undo_group_start()
     try:
-        if transform_layer and mapped_pixels is not None and source is not None:
-            _push_bytes_to_layer(source, width, height, mapped_pixels)
+        if transform_layer and mapped_pixels is not None:
+            mapped_layer = Gimp.Layer.new(
+                image,
+                "Conformal Transform",
+                width,
+                height,
+                Gimp.ImageType.RGBA_IMAGE,
+                100.0,
+                _layer_mode("NORMAL", "NORMAL_LEGACY"),
+            )
+            image.insert_layer(mapped_layer, None, -1)
+            _push_bytes_to_layer(mapped_layer, width, height, mapped_pixels)
 
         if create_analysis:
             arg_layer = Gimp.Layer.new(
@@ -594,20 +695,20 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             )
             mod_layer = Gimp.Layer.new(
                 image,
-                "Log. modulus",
+                "Log Modulus",
                 width,
                 height,
                 Gimp.ImageType.RGBA_IMAGE,
-                35.0,
+                33.3,
                 _layer_mode("LCH_VALUE", "HSV_VALUE", "VALUE", "VALUE_LEGACY"),
             )
             grid_layer = Gimp.Layer.new(
                 image,
-                "Grid",
+                "Checkerboard" if checkerboard else "Grid",
                 width,
                 height,
                 Gimp.ImageType.RGBA_IMAGE,
-                10.0,
+                33.3,
                 _layer_mode("DARKEN_ONLY", "DARKEN_ONLY_LEGACY", "DARKEN", "DARKEN_LEGACY"),
             )
             image.insert_layer(arg_layer, None, -1)
