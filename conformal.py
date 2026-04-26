@@ -444,7 +444,7 @@ def _drawable_pixels_rgba(drawable, width, height):
     return bytes(data)
 
 
-def _show_dialog(procedure, config):
+def _show_dialog(procedure, config, width, height):
     gi.require_version("GimpUi", "3.0")
     gi.require_version("Gtk", "3.0")
     from gi.repository import GimpUi
@@ -457,7 +457,9 @@ def _show_dialog(procedure, config):
         _UI_INITIALIZED = True
 
     dialog = Gtk.Dialog(title="Conformal Map Transform", modal=True)
+    RESPONSE_RESET = 1
     dialog.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+    dialog.add_button("_Reset", RESPONSE_RESET)
     dialog.add_button("_OK", Gtk.ResponseType.OK)
     dialog.set_default_size(760, 560)
     area = dialog.get_content_area()
@@ -491,14 +493,52 @@ def _show_dialog(procedure, config):
         scale.set_draw_value(True)
         scale.set_hexpand(True)
         grid.attach(scale, 1, row, 3, 1)
+        spin = Gtk.SpinButton.new(adj, climb_rate=0.5, digits=5)
+        spin.set_numeric(True)
+        spin.set_width_chars(8)
+        grid.attach(spin, 4, row, 1, 1)
         scale_widgets[name] = scale
         row += 1
+
+    units_combo = Gtk.ComboBoxText()
+    units_combo.append("portion", "Portion")
+    units_combo.append("pixels", "Pixels")
+    units_combo.set_active_id(str(config.get_property("x-y-units")) if hasattr(config, "get_property") else "portion")
+    if units_combo.get_active_id() is None:
+        units_combo.set_active_id("portion")
+    grid.attach(Gtk.Label(label="X/Y units", xalign=0.0), 0, row, 1, 1)
+    grid.attach(units_combo, 1, row, 1, 1)
+    row += 1
 
     _make_scale("x-left", "X left", -1.0e9, 1.0e9, config.get_property("x-left"), 0.00001)
     _make_scale("x-right", "X right", -1.0e9, 1.0e9, config.get_property("x-right"), 0.00001)
     _make_scale("y-top", "Y top", -1.0e9, 1.0e9, config.get_property("y-top"), 0.00001)
     _make_scale("y-bottom", "Y bottom", -1.0e9, 1.0e9, config.get_property("y-bottom"), 0.00001)
     _make_scale("grid-spacing", "Grid step", 1.0e-12, 1.0e9, config.get_property("grid-spacing"), 0.00001)
+
+    def _convert_units(_widget):
+        old = getattr(_convert_units, "last", "portion")
+        new = units_combo.get_active_id() or "portion"
+        if old == new:
+            return
+        xv1 = scale_widgets["x-left"].get_value()
+        xv2 = scale_widgets["x-right"].get_value()
+        yv1 = scale_widgets["y-top"].get_value()
+        yv2 = scale_widgets["y-bottom"].get_value()
+        if old == "portion" and new == "pixels":
+            scale_widgets["x-left"].set_value(xv1 * max(1, width - 1))
+            scale_widgets["x-right"].set_value(xv2 * max(1, width - 1))
+            scale_widgets["y-top"].set_value(yv1 * max(1, height - 1))
+            scale_widgets["y-bottom"].set_value(yv2 * max(1, height - 1))
+        elif old == "pixels" and new == "portion":
+            scale_widgets["x-left"].set_value(xv1 / max(1, width - 1))
+            scale_widgets["x-right"].set_value(xv2 / max(1, width - 1))
+            scale_widgets["y-top"].set_value(yv1 / max(1, height - 1))
+            scale_widgets["y-bottom"].set_value(yv2 / max(1, height - 1))
+        _convert_units.last = new
+
+    _convert_units.last = units_combo.get_active_id() or "portion"
+    units_combo.connect("changed", _convert_units)
 
     gradient_combo = Gtk.ComboBoxText()
     for key, label in [("HSV", "HSV"), ("grayscale", "Grayscale"), ("red-blue", "Red-Blue"), ("white-black", "White-Black"), ("custom", "Custom")]:
@@ -568,14 +608,42 @@ def _show_dialog(procedure, config):
     abyss_combo.connect("changed", lambda *_a: _sync())
     _sync()
 
+    def _reset_defaults():
+        code_buffer.set_text("w = z")
+        scale_widgets["x-left"].set_value(-1.0)
+        scale_widgets["x-right"].set_value(1.0)
+        scale_widgets["y-top"].set_value(1.0)
+        scale_widgets["y-bottom"].set_value(-1.0)
+        scale_widgets["grid-spacing"].set_value(1.0)
+        units_combo.set_active_id("portion")
+        gradient_combo.set_active_id("HSV")
+        gradient_entry.set_text("#ff0000,#ffff00,#00ff00,#00ffff,#0000ff")
+        abyss_combo.set_active_id("transparent")
+        abyss_spin.set_value(1)
+        transform_check.set_active(True)
+        analysis_check.set_active(True)
+        checker_check.set_active(False)
+        _sync()
+
     dialog.show_all()
-    accepted = dialog.run() == Gtk.ResponseType.OK
+    accepted = False
+    while True:
+        response = dialog.run()
+        if response == RESPONSE_RESET:
+            _reset_defaults()
+            continue
+        if response == Gtk.ResponseType.OK:
+            accepted = True
+            break
+        break
+
     if accepted:
         start = code_buffer.get_start_iter()
         end = code_buffer.get_end_iter()
         config.set_property("code", code_buffer.get_text(start, end, True))
         for name, scale in scale_widgets.items():
             config.set_property(name, float(scale.get_value()))
+        config.set_property("x-y-units", units_combo.get_active_id() or "portion")
         config.set_property("gradient-preset", gradient_combo.get_active_id() or "HSV")
         config.set_property("gradient-custom", gradient_entry.get_text().strip())
         config.set_property("abyss-mode", abyss_combo.get_active_id() or "transparent")
@@ -598,6 +666,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     yt = config.get_property("y-top")
     yb = config.get_property("y-bottom")
     grid = config.get_property("grid-spacing")
+    xy_units = config.get_property("x-y-units")
     checkerboard = config.get_property("checkerboard")
     gradient_preset = config.get_property("gradient-preset")
     gradient_custom = config.get_property("gradient-custom")
@@ -612,7 +681,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     create_analysis = config.get_property("create-analysis-layers")
 
     if run_mode == Gimp.RunMode.INTERACTIVE:
-        if not _show_dialog(procedure, config):
+        if not _show_dialog(procedure, config, width, height):
             return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
         code = config.get_property("code")
         constraint = "p = True"
@@ -621,6 +690,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         yt = config.get_property("y-top")
         yb = config.get_property("y-bottom")
         grid = config.get_property("grid-spacing")
+        xy_units = config.get_property("x-y-units")
         checkerboard = config.get_property("checkerboard")
         gradient_preset = config.get_property("gradient-preset")
         gradient_custom = config.get_property("gradient-custom")
@@ -633,6 +703,12 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         abyss_loop_iterations = config.get_property("abyss-loop-iterations")
         transform_layer = config.get_property("transform-active-layer")
         create_analysis = config.get_property("create-analysis-layers")
+
+    if str(xy_units).strip().lower() == "portion":
+        xl *= max(1, width - 1)
+        xr *= max(1, width - 1)
+        yt *= max(1, height - 1)
+        yb *= max(1, height - 1)
 
     try:
         renderer = ConformalRenderer(
@@ -777,6 +853,10 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_double_argument("y-top", "Y _top", "Top bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("y-bottom", "Y bo_ttom", "Bottom bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("grid-spacing", "Grid _step", "Grid spacing in mapped complex plane", 1.0e-12, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
+        units_choice = Gimp.Choice.new()
+        units_choice.add("portion", 0, _("Portion"), "Normalized image portion units")
+        units_choice.add("pixels", 1, _("Pixels"), "Absolute pixel units")
+        procedure.add_choice_argument("x-y-units", "_X/Y units", "Coordinate unit system for x/y bounds", units_choice, "portion", GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("checkerboard", "_Checkerboard", "Use checkerboard instead of line grid", False, GObject.ParamFlags.READWRITE)
         choices_gradient = Gimp.Choice.new()
         choices_gradient.add("HSV", 0, _("HSV"), "HSV wheel")

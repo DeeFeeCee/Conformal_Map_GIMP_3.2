@@ -1,6 +1,6 @@
 # Conformal Mapping Plugin for Gimp 3
 
-This is a plugin-in for http://gimp.org[Gimp 3] which uses complex functions to transform an image while preserving local angles. Its primary workflow is to transform an existing image through a [conformal map](https://en.wikipedia.org/wiki/Conformal_map), while also including optional analysis layers such as a grid & customizable domain coloring.
+This is a plugin-in for [Gimp 3](http://gimp.org) which uses complex functions to transform an image while preserving local angles. Its primary workflow is to transform an existing image through a [conformal map](https://en.wikipedia.org/wiki/Conformal_map), while also including optional analysis layers such as a grid & customizable domain coloring. This is an updated version of the [GIMP 2 plugin](https://github.com/mjg/conformal) by Michael J. Gruber. This would not be possible without his code, untouched for nearly 14 years. Also thanks to Codex because I don't know Python.
 
 ## Installation
 
