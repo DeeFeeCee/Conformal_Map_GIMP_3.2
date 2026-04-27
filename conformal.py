@@ -81,6 +81,7 @@ class ConformalRenderer:
         gradient,
         abyss_mode,
         abyss_loop_iterations,
+        log_base,
     ):
         self.width = max(1, int(width))
         self.height = max(1, int(height))
@@ -97,12 +98,18 @@ class ConformalRenderer:
         self.gradient = gradient or "HSV"
         self.abyss_mode = (abyss_mode or "transparent").strip().lower()
         self.abyss_loop_iterations = max(1, int(abyss_loop_iterations))
+        self.log_base = str(log_base or "2")
         self._validate_gradient_setting()
 
         self._sx = (self.width - 1.0) / (self.xr - self.xl)
         self._sy = (self.height - 1.0) / (self.yt - self.yb)
         self._two_pi = 2.0 * math.pi
-        self._log2 = math.log(2.0)
+        if self.log_base == "e":
+            self._log = 1.0
+        elif self.log_base == "10":
+            self._log = math.log(10.0)
+        else:
+            self._log = math.log(2.0)
 
         self._compiled_code = compile(self.code, "conformal-code", "exec")
         self._compiled_constraint = compile(self.constraint, "conformal-constraint", "exec")
@@ -292,7 +299,7 @@ class ConformalRenderer:
                 if arg < 0.0:
                     arg += self._two_pi
                 arg_norm = arg / self._two_pi
-                mod = (logw.real / self._log2) % 1.0
+                mod = (logw.real / self._log) % 1.0
                 sqr = int(math.floor(w.imag / self.grid)) + int(math.floor(w.real / self.grid))
                 sqr = sqr % 2
                 x_mod = abs((w.real / self.grid) - round(w.real / self.grid))
@@ -469,9 +476,11 @@ def _show_dialog(procedure, config, width, height):
     row = 0
     code_label = Gtk.Label(label="Formula")
     code_label.set_xalign(0.0)
+    code_label.set_tooltip_text("Python code assigning w from z.")
     grid.attach(code_label, 0, row, 1, 1)
     code_view = Gtk.TextView()
     code_view.set_monospace(True)
+    code_view.set_tooltip_text("Supports shorthand like 2z, i, and ^.")
     code_buffer = code_view.get_buffer()
     code_buffer.set_text(config.get_property("code"))
     sw = Gtk.ScrolledWindow()
@@ -500,46 +509,45 @@ def _show_dialog(procedure, config, width, height):
         scale_widgets[name] = (scale, spin)
         row += 1
 
-    units_combo = Gtk.ComboBoxText()
-    units_combo.append("portion", "Portion")
-    units_combo.append("pixels", "Pixels")
-    units_combo.set_active_id(str(config.get_property("x-y-units")) if hasattr(config, "get_property") else "portion")
-    if units_combo.get_active_id() is None:
-        units_combo.set_active_id("portion")
-    grid.attach(Gtk.Label(label="X/Y units", xalign=0.0), 0, row, 1, 1)
-    grid.attach(units_combo, 1, row, 1, 1)
+    coord_combo = Gtk.ComboBoxText()
+    coord_combo.append("relative", "Relative coordinates")
+    coord_combo.append("pixels", "Pixels")
+    coord_combo.set_active_id(str(config.get_property("coord-system")) if hasattr(config, "get_property") else "relative")
+    if coord_combo.get_active_id() is None:
+        coord_combo.set_active_id("relative")
+    coord_label = Gtk.Label(label="Coordinate system")
+    coord_label.set_xalign(0.0)
+    coord_label.set_tooltip_text("Relative coordinates: 1 equals the distance to the short edge.")
+    grid.attach(coord_label, 0, row, 1, 1)
+    coord_combo.set_tooltip_text("Select center coordinate units.")
+    grid.attach(coord_combo, 1, row, 1, 1)
     row += 1
 
-    _make_scale("x-left", "X left", -1.0e3, 1.0e3, config.get_property("x-left"), 0.01, 0.1, digits=5)
-    _make_scale("x-right", "X right", -1.0e3, 1.0e3, config.get_property("x-right"), 0.01, 0.1, digits=5)
-    _make_scale("y-top", "Y top", -1.0e3, 1.0e3, config.get_property("y-top"), 0.01, 0.1, digits=5)
-    _make_scale("y-bottom", "Y bottom", -1.0e3, 1.0e3, config.get_property("y-bottom"), 0.01, 0.1, digits=5)
-    _make_scale("grid-spacing", "Grid length (shorter side)", 1.0, 1000.0, config.get_property("grid-spacing"), 0.1, 1.0, digits=2)
+    _make_scale("center-x", "Center X", -1.0e3, 1.0e3, config.get_property("center-x"), 0.01, 0.1, digits=5)
+    _make_scale("center-y", "Center Y", -1.0e3, 1.0e3, config.get_property("center-y"), 0.01, 0.1, digits=5)
+    _make_scale("zoom", "Zoom", -1.0e3, 1.0e3, config.get_property("zoom"), 0.01, 0.1, digits=5)
 
     def _convert_units(_widget):
-        old = getattr(_convert_units, "last", "portion")
-        new = units_combo.get_active_id() or "portion"
+        old = getattr(_convert_units, "last", "relative")
+        new = coord_combo.get_active_id() or "relative"
         if old != new:
-            xv1 = scale_widgets["x-left"][0].get_value()
-            xv2 = scale_widgets["x-right"][0].get_value()
-            yv1 = scale_widgets["y-top"][0].get_value()
-            yv2 = scale_widgets["y-bottom"][0].get_value()
-            if old == "portion" and new == "pixels":
-                scale_widgets["x-left"][0].set_value(xv1 * max(1, width - 1))
-                scale_widgets["x-right"][0].set_value(xv2 * max(1, width - 1))
-                scale_widgets["y-top"][0].set_value(yv1 * max(1, height - 1))
-                scale_widgets["y-bottom"][0].set_value(yv2 * max(1, height - 1))
-            elif old == "pixels" and new == "portion":
-                scale_widgets["x-left"][0].set_value(xv1 / max(1, width - 1))
-                scale_widgets["x-right"][0].set_value(xv2 / max(1, width - 1))
-                scale_widgets["y-top"][0].set_value(yv1 / max(1, height - 1))
-                scale_widgets["y-bottom"][0].set_value(yv2 / max(1, height - 1))
+            cx = scale_widgets["center-x"][0].get_value()
+            cy = scale_widgets["center-y"][0].get_value()
+            short_half = min(width, height) / 2.0
+            img_cx = (width - 1) / 2.0
+            img_cy = (height - 1) / 2.0
+            if old == "relative" and new == "pixels":
+                scale_widgets["center-x"][0].set_value(img_cx + cx * short_half)
+                scale_widgets["center-y"][0].set_value(img_cy - cy * short_half)
+            elif old == "pixels" and new == "relative":
+                scale_widgets["center-x"][0].set_value((cx - img_cx) / max(short_half, 1e-9))
+                scale_widgets["center-y"][0].set_value((img_cy - cy) / max(short_half, 1e-9))
 
         if new == "pixels":
-            lower, upper, step, page, digits = -1.0e4, 1.0e4, 1.0, 10.0, 0
+            lower, upper, step, page, digits = -1.0e4, 1.0e4, 0.5, 10.0, 4
         else:
             lower, upper, step, page, digits = -1.0e3, 1.0e3, 0.01, 0.1, 5
-        for key in ("x-left", "x-right", "y-top", "y-bottom"):
+        for key in ("center-x", "center-y"):
             scale, spin = scale_widgets[key]
             adj = scale.get_adjustment()
             adj.set_lower(lower)
@@ -550,8 +558,8 @@ def _show_dialog(procedure, config, width, height):
             spin.set_digits(digits)
         _convert_units.last = new
 
-    _convert_units.last = units_combo.get_active_id() or "portion"
-    units_combo.connect("changed", _convert_units)
+    _convert_units.last = coord_combo.get_active_id() or "relative"
+    coord_combo.connect("changed", _convert_units)
     _convert_units(None)
 
     gradient_combo = Gtk.ComboBoxText()
@@ -600,6 +608,19 @@ def _show_dialog(procedure, config, width, height):
     grid.attach(abyss_spin, 3, row, 1, 1)
     row += 1
 
+    _make_scale("grid-spacing", "Grid length (shorter side)", 1.0, 1000.0, config.get_property("grid-spacing"), 1.0, 10.0, digits=2)
+
+    log_combo = Gtk.ComboBoxText()
+    log_combo.append("2", "2")
+    log_combo.append("e", "e")
+    log_combo.append("10", "10")
+    log_combo.set_active_id(str(config.get_property("log-base")))
+    if log_combo.get_active_id() is None:
+        log_combo.set_active_id("2")
+    grid.attach(Gtk.Label(label="Logarithm", xalign=0.0), 0, row, 1, 1)
+    grid.attach(log_combo, 1, row, 1, 1)
+    row += 1
+
     transform_check = Gtk.CheckButton(label="Transform active layer")
     transform_check.set_active(bool(config.get_property("transform-active-layer")))
     analysis_check = Gtk.CheckButton(label="Add analysis layers")
@@ -624,16 +645,16 @@ def _show_dialog(procedure, config, width, height):
 
     def _reset_defaults():
         code_buffer.set_text("w = z")
-        scale_widgets["x-left"][0].set_value(-1.0)
-        scale_widgets["x-right"][0].set_value(1.0)
-        scale_widgets["y-top"][0].set_value(1.0)
-        scale_widgets["y-bottom"][0].set_value(-1.0)
+        scale_widgets["center-x"][0].set_value(0.0)
+        scale_widgets["center-y"][0].set_value(0.0)
+        scale_widgets["zoom"][0].set_value(1.0)
         scale_widgets["grid-spacing"][0].set_value(4.0)
-        units_combo.set_active_id("portion")
+        coord_combo.set_active_id("relative")
         gradient_combo.set_active_id("HSV")
         gradient_entry.set_text("#ff0000,#ffff00,#00ff00,#00ffff,#0000ff")
         abyss_combo.set_active_id("transparent")
-        abyss_spin.set_value(1)
+        abyss_spin.set_value(2)
+        log_combo.set_active_id("2")
         transform_check.set_active(True)
         analysis_check.set_active(True)
         checker_check.set_active(False)
@@ -641,16 +662,16 @@ def _show_dialog(procedure, config, width, height):
 
     last_used = {
         "code": config.get_property("code"),
-        "x-left": config.get_property("x-left"),
-        "x-right": config.get_property("x-right"),
-        "y-top": config.get_property("y-top"),
-        "y-bottom": config.get_property("y-bottom"),
+        "center-x": config.get_property("center-x"),
+        "center-y": config.get_property("center-y"),
+        "zoom": config.get_property("zoom"),
         "grid-spacing": config.get_property("grid-spacing"),
-        "x-y-units": units_combo.get_active_id() or "portion",
+        "coord-system": coord_combo.get_active_id() or "relative",
         "gradient-preset": gradient_combo.get_active_id() or "HSV",
         "gradient-custom": gradient_entry.get_text(),
         "abyss-mode": abyss_combo.get_active_id() or "transparent",
         "abyss-loop-iterations": int(abyss_spin.get_value_as_int()),
+        "log-base": log_combo.get_active_id() or "2",
         "transform-active-layer": transform_check.get_active(),
         "create-analysis-layers": analysis_check.get_active(),
         "checkerboard": checker_check.get_active(),
@@ -658,16 +679,16 @@ def _show_dialog(procedure, config, width, height):
 
     def _reset_last():
         code_buffer.set_text(last_used["code"])
-        scale_widgets["x-left"][0].set_value(float(last_used["x-left"]))
-        scale_widgets["x-right"][0].set_value(float(last_used["x-right"]))
-        scale_widgets["y-top"][0].set_value(float(last_used["y-top"]))
-        scale_widgets["y-bottom"][0].set_value(float(last_used["y-bottom"]))
+        scale_widgets["center-x"][0].set_value(float(last_used["center-x"]))
+        scale_widgets["center-y"][0].set_value(float(last_used["center-y"]))
+        scale_widgets["zoom"][0].set_value(float(last_used["zoom"]))
         scale_widgets["grid-spacing"][0].set_value(float(last_used["grid-spacing"]))
-        units_combo.set_active_id(last_used["x-y-units"])
+        coord_combo.set_active_id(last_used["coord-system"])
         gradient_combo.set_active_id(last_used["gradient-preset"])
         gradient_entry.set_text(last_used["gradient-custom"])
         abyss_combo.set_active_id(last_used["abyss-mode"])
         abyss_spin.set_value(last_used["abyss-loop-iterations"])
+        log_combo.set_active_id(last_used["log-base"])
         transform_check.set_active(bool(last_used["transform-active-layer"]))
         analysis_check.set_active(bool(last_used["create-analysis-layers"]))
         checker_check.set_active(bool(last_used["checkerboard"]))
@@ -694,11 +715,12 @@ def _show_dialog(procedure, config, width, height):
         config.set_property("code", code_buffer.get_text(start, end, True))
         for name, pair in scale_widgets.items():
             config.set_property(name, float(pair[0].get_value()))
-        config.set_property("x-y-units", units_combo.get_active_id() or "portion")
+        config.set_property("coord-system", coord_combo.get_active_id() or "relative")
         config.set_property("gradient-preset", gradient_combo.get_active_id() or "HSV")
         config.set_property("gradient-custom", gradient_entry.get_text().strip())
         config.set_property("abyss-mode", abyss_combo.get_active_id() or "transparent")
         config.set_property("abyss-loop-iterations", int(abyss_spin.get_value_as_int()))
+        config.set_property("log-base", log_combo.get_active_id() or "2")
         config.set_property("transform-active-layer", bool(transform_check.get_active()))
         config.set_property("create-analysis-layers", bool(analysis_check.get_active()))
         config.set_property("checkerboard", bool(checker_check.get_active()))
