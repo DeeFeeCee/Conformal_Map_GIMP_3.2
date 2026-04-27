@@ -90,7 +90,9 @@ class ConformalRenderer:
         self.xr = float(xr)
         self.yt = float(yt)
         self.yb = float(yb)
-        self.grid = max(float(grid), 1e-9)
+        self.grid_lines = max(float(grid), 1.0)
+        shorter_span = max(min(abs(self.xr - self.xl), abs(self.yt - self.yb)), 1e-9)
+        self.grid = max(shorter_span / self.grid_lines, 1e-9)
         self.checkerboard = bool(checkerboard)
         self.gradient = gradient or "HSV"
         self.abyss_mode = (abyss_mode or "transparent").strip().lower()
@@ -388,8 +390,7 @@ def _layer_mode(*names):
 
 
 def _push_bytes_to_layer(layer, width, height, rgba_bytes):
-    shadow_buffer = layer.get_shadow_buffer() if hasattr(layer, "get_shadow_buffer") else None
-    buffer = shadow_buffer if shadow_buffer is not None else layer.get_buffer()
+    buffer = layer.get_buffer()
     rect = Gegl.Rectangle.new(0, 0, width, height)
 
     # GIMP 3 builds may expose different introspection overloads for buffer.set().
@@ -399,8 +400,6 @@ def _push_bytes_to_layer(layer, width, height, rgba_bytes):
         # Fallback overload: set(rect, rowstride, format, bytes)
         buffer.set(rect, width * 4, "R'G'B'A u8", rgba_bytes)
 
-    if shadow_buffer is not None and hasattr(layer, "merge_shadow"):
-        layer.merge_shadow(True)
     if hasattr(layer, "update"):
         layer.update(0, 0, width, height)
     if hasattr(layer, "flush"):
@@ -449,7 +448,6 @@ def _show_dialog(procedure, config, width, height):
     gi.require_version("Gtk", "3.0")
     from gi.repository import GimpUi
     from gi.repository import Gtk
-    from gi.repository import Gdk
 
     global _UI_INITIALIZED
     if not _UI_INITIALIZED:
@@ -457,9 +455,11 @@ def _show_dialog(procedure, config, width, height):
         _UI_INITIALIZED = True
 
     dialog = Gtk.Dialog(title="Conformal Map Transform", modal=True)
-    RESPONSE_RESET = 1
+    RESPONSE_RESET_DEFAULTS = 1
+    RESPONSE_RESET_LAST = 2
     dialog.add_button("_Cancel", Gtk.ResponseType.CANCEL)
-    dialog.add_button("_Reset", RESPONSE_RESET)
+    dialog.add_button("Reset _Defaults", RESPONSE_RESET_DEFAULTS)
+    dialog.add_button("Reset _Last Used", RESPONSE_RESET_LAST)
     dialog.add_button("_OK", Gtk.ResponseType.OK)
     dialog.set_default_size(760, 560)
     area = dialog.get_content_area()
@@ -482,18 +482,18 @@ def _show_dialog(procedure, config, width, height):
 
     scale_widgets = {}
 
-    def _make_scale(name, label_text, lower, upper, value, step):
+    def _make_scale(name, label_text, lower, upper, value, step, digits=5):
         nonlocal row
         label = Gtk.Label(label=label_text)
         label.set_xalign(0.0)
         grid.attach(label, 0, row, 1, 1)
         adj = Gtk.Adjustment(value=float(value), lower=float(lower), upper=float(upper), step_increment=float(step), page_increment=float(step) * 10.0, page_size=0.0)
         scale = Gtk.Scale.new(Gtk.Orientation.HORIZONTAL, adj)
-        scale.set_digits(5)
+        scale.set_digits(digits)
         scale.set_draw_value(True)
         scale.set_hexpand(True)
         grid.attach(scale, 1, row, 3, 1)
-        spin = Gtk.SpinButton.new(adj, climb_rate=0.5, digits=5)
+        spin = Gtk.SpinButton.new(adj, climb_rate=0.5, digits=digits)
         spin.set_numeric(True)
         spin.set_width_chars(8)
         grid.attach(spin, 4, row, 1, 1)
@@ -510,11 +510,11 @@ def _show_dialog(procedure, config, width, height):
     grid.attach(units_combo, 1, row, 1, 1)
     row += 1
 
-    _make_scale("x-left", "X left", -1.0e9, 1.0e9, config.get_property("x-left"), 0.00001)
-    _make_scale("x-right", "X right", -1.0e9, 1.0e9, config.get_property("x-right"), 0.00001)
-    _make_scale("y-top", "Y top", -1.0e9, 1.0e9, config.get_property("y-top"), 0.00001)
-    _make_scale("y-bottom", "Y bottom", -1.0e9, 1.0e9, config.get_property("y-bottom"), 0.00001)
-    _make_scale("grid-spacing", "Grid step", 1.0e-12, 1.0e9, config.get_property("grid-spacing"), 0.00001)
+    _make_scale("x-left", "X left", -1.0e9, 1.0e9, config.get_property("x-left"), 0.00001, digits=5)
+    _make_scale("x-right", "X right", -1.0e9, 1.0e9, config.get_property("x-right"), 0.00001, digits=5)
+    _make_scale("y-top", "Y top", -1.0e9, 1.0e9, config.get_property("y-top"), 0.00001, digits=5)
+    _make_scale("y-bottom", "Y bottom", -1.0e9, 1.0e9, config.get_property("y-bottom"), 0.00001, digits=5)
+    _make_scale("grid-spacing", "Grid lines (shorter side)", 1.0, 1000.0, config.get_property("grid-spacing"), 0.01, digits=2)
 
     def _convert_units(_widget):
         old = getattr(_convert_units, "last", "portion")
@@ -614,7 +614,7 @@ def _show_dialog(procedure, config, width, height):
         scale_widgets["x-right"].set_value(1.0)
         scale_widgets["y-top"].set_value(1.0)
         scale_widgets["y-bottom"].set_value(-1.0)
-        scale_widgets["grid-spacing"].set_value(1.0)
+        scale_widgets["grid-spacing"].set_value(3.0)
         units_combo.set_active_id("portion")
         gradient_combo.set_active_id("HSV")
         gradient_entry.set_text("#ff0000,#ffff00,#00ff00,#00ffff,#0000ff")
@@ -625,12 +625,49 @@ def _show_dialog(procedure, config, width, height):
         checker_check.set_active(False)
         _sync()
 
+    last_used = {
+        "code": config.get_property("code"),
+        "x-left": config.get_property("x-left"),
+        "x-right": config.get_property("x-right"),
+        "y-top": config.get_property("y-top"),
+        "y-bottom": config.get_property("y-bottom"),
+        "grid-spacing": config.get_property("grid-spacing"),
+        "x-y-units": units_combo.get_active_id() or "portion",
+        "gradient-preset": gradient_combo.get_active_id() or "HSV",
+        "gradient-custom": gradient_entry.get_text(),
+        "abyss-mode": abyss_combo.get_active_id() or "transparent",
+        "abyss-loop-iterations": int(abyss_spin.get_value_as_int()),
+        "transform-active-layer": transform_check.get_active(),
+        "create-analysis-layers": analysis_check.get_active(),
+        "checkerboard": checker_check.get_active(),
+    }
+
+    def _reset_last():
+        code_buffer.set_text(last_used["code"])
+        scale_widgets["x-left"].set_value(float(last_used["x-left"]))
+        scale_widgets["x-right"].set_value(float(last_used["x-right"]))
+        scale_widgets["y-top"].set_value(float(last_used["y-top"]))
+        scale_widgets["y-bottom"].set_value(float(last_used["y-bottom"]))
+        scale_widgets["grid-spacing"].set_value(float(last_used["grid-spacing"]))
+        units_combo.set_active_id(last_used["x-y-units"])
+        gradient_combo.set_active_id(last_used["gradient-preset"])
+        gradient_entry.set_text(last_used["gradient-custom"])
+        abyss_combo.set_active_id(last_used["abyss-mode"])
+        abyss_spin.set_value(last_used["abyss-loop-iterations"])
+        transform_check.set_active(bool(last_used["transform-active-layer"]))
+        analysis_check.set_active(bool(last_used["create-analysis-layers"]))
+        checker_check.set_active(bool(last_used["checkerboard"]))
+        _sync()
+
     dialog.show_all()
     accepted = False
     while True:
         response = dialog.run()
-        if response == RESPONSE_RESET:
+        if response == RESPONSE_RESET_DEFAULTS:
             _reset_defaults()
+            continue
+        if response == RESPONSE_RESET_LAST:
+            _reset_last()
             continue
         if response == Gtk.ResponseType.OK:
             accepted = True
@@ -710,8 +747,19 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         yt *= max(1, height - 1)
         yb *= max(1, height - 1)
 
+    square_size = min(width, height)
+    axl, axr, ayt, ayb = xl, xr, yt, yb
+    if width > height:
+        x_mid = (xl + xr) / 2.0
+        x_half = (xr - xl) * (square_size / float(width)) / 2.0
+        axl, axr = x_mid - x_half, x_mid + x_half
+    elif height > width:
+        y_mid = (yt + yb) / 2.0
+        y_half = (yt - yb) * (square_size / float(height)) / 2.0
+        ayt, ayb = y_mid + y_half, y_mid - y_half
+
     try:
-        renderer = ConformalRenderer(
+        renderer_full = ConformalRenderer(
             width,
             height,
             code,
@@ -720,6 +768,21 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             xr,
             yt,
             yb,
+            grid,
+            checkerboard,
+            gradient,
+            abyss_mode,
+            abyss_loop_iterations,
+        )
+        renderer_analysis = ConformalRenderer(
+            square_size,
+            square_size,
+            code,
+            constraint,
+            axl,
+            axr,
+            ayt,
+            ayb,
             grid,
             checkerboard,
             gradient,
@@ -736,9 +799,13 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         Gimp.progress_init("Rendering conformal map…")
 
     try:
-        arg_pixels, mod_pixels, grid_pixels, mapped_pixels = renderer.render(
+        _, _, _, mapped_pixels = renderer_full.render(
             source_pixels=source_pixels,
             progress_cb=(lambda value: Gimp.progress_update(value)) if run_mode == Gimp.RunMode.INTERACTIVE else None
+        )
+        arg_pixels, mod_pixels, grid_pixels, _ = renderer_analysis.render(
+            source_pixels=None,
+            progress_cb=None,
         )
     except Exception as exc:
         Gimp.message(f"Conformal Mapping render error: {exc}")
@@ -760,11 +827,13 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             _push_bytes_to_layer(mapped_layer, width, height, mapped_pixels)
 
         if create_analysis:
+            analysis_offset_x = (width - square_size) // 2
+            analysis_offset_y = (height - square_size) // 2
             arg_layer = Gimp.Layer.new(
                 image,
                 "Argument",
-                width,
-                height,
+                square_size,
+                square_size,
                 Gimp.ImageType.RGBA_IMAGE,
                 100.0,
                 _layer_mode("NORMAL", "NORMAL_LEGACY"),
@@ -772,8 +841,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             mod_layer = Gimp.Layer.new(
                 image,
                 "Log Modulus",
-                width,
-                height,
+                square_size,
+                square_size,
                 Gimp.ImageType.RGBA_IMAGE,
                 33.3,
                 _layer_mode("LCH_VALUE", "HSV_VALUE", "VALUE", "VALUE_LEGACY"),
@@ -781,8 +850,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             grid_layer = Gimp.Layer.new(
                 image,
                 "Checkerboard" if checkerboard else "Grid",
-                width,
-                height,
+                square_size,
+                square_size,
                 Gimp.ImageType.RGBA_IMAGE,
                 33.3,
                 _layer_mode("DARKEN_ONLY", "DARKEN_ONLY_LEGACY", "DARKEN", "DARKEN_LEGACY"),
@@ -790,9 +859,13 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             image.insert_layer(arg_layer, None, -1)
             image.insert_layer(mod_layer, None, -1)
             image.insert_layer(grid_layer, None, -1)
-            _push_bytes_to_layer(arg_layer, width, height, arg_pixels)
-            _push_bytes_to_layer(mod_layer, width, height, mod_pixels)
-            _push_bytes_to_layer(grid_layer, width, height, grid_pixels)
+            if hasattr(arg_layer, "set_offsets"):
+                arg_layer.set_offsets(analysis_offset_x, analysis_offset_y)
+                mod_layer.set_offsets(analysis_offset_x, analysis_offset_y)
+                grid_layer.set_offsets(analysis_offset_x, analysis_offset_y)
+            _push_bytes_to_layer(arg_layer, square_size, square_size, arg_pixels)
+            _push_bytes_to_layer(mod_layer, square_size, square_size, mod_pixels)
+            _push_bytes_to_layer(grid_layer, square_size, square_size, grid_pixels)
 
         comment = (
             f"# conformal {CONF_VERSION}\n"
@@ -852,7 +925,7 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_double_argument("x-right", "X r_ight", "Right bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("y-top", "Y _top", "Top bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("y-bottom", "Y bo_ttom", "Bottom bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("grid-spacing", "Grid _step", "Grid spacing in mapped complex plane", 1.0e-12, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("grid-spacing", "Grid _lines (shorter side)", "Number of grid lines on the shorter axis", 1.0, 1000.0, 3.0, GObject.ParamFlags.READWRITE)
         units_choice = Gimp.Choice.new()
         units_choice.add("portion", 0, _("Portion"), "Normalized image portion units")
         units_choice.add("pixels", 1, _("Pixels"), "Absolute pixel units")
