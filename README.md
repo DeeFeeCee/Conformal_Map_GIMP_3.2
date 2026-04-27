@@ -13,7 +13,7 @@ Open an image, select a layer, then run **Filters → Distorts → Conformal Map
 Main controls:
 
 - **Formula**: Python code assigning `w` from `z`.
-- **X left / X right / Y top / Y bottom / Grid lines (shorter side)**: Numeric map controls via slider + text entry.
+- **X left / X right / Y top / Y bottom / Grid length (shorter side)**: Numeric map controls via slider + text entry.
 - **Palette / Custom palette**: Domain coloring options.
 - **Abyss mode / Wrap iterations**: Out-of-bounds sampling behavior.
 - **Reset Defaults / Reset Last Used**: Quickly restore either factory defaults or the values from when the dialog was opened.

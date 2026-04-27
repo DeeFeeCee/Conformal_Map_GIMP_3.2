@@ -482,12 +482,12 @@ def _show_dialog(procedure, config, width, height):
 
     scale_widgets = {}
 
-    def _make_scale(name, label_text, lower, upper, value, step, digits=5):
+    def _make_scale(name, label_text, lower, upper, value, step, page, digits=5):
         nonlocal row
         label = Gtk.Label(label=label_text)
         label.set_xalign(0.0)
         grid.attach(label, 0, row, 1, 1)
-        adj = Gtk.Adjustment(value=float(value), lower=float(lower), upper=float(upper), step_increment=float(step), page_increment=float(step) * 10.0, page_size=0.0)
+        adj = Gtk.Adjustment(value=float(value), lower=float(lower), upper=float(upper), step_increment=float(step), page_increment=float(page), page_size=0.0)
         scale = Gtk.Scale.new(Gtk.Orientation.HORIZONTAL, adj)
         scale.set_digits(digits)
         scale.set_draw_value(True)
@@ -497,7 +497,7 @@ def _show_dialog(procedure, config, width, height):
         spin.set_numeric(True)
         spin.set_width_chars(8)
         grid.attach(spin, 4, row, 1, 1)
-        scale_widgets[name] = scale
+        scale_widgets[name] = (scale, spin)
         row += 1
 
     units_combo = Gtk.ComboBoxText()
@@ -510,35 +510,49 @@ def _show_dialog(procedure, config, width, height):
     grid.attach(units_combo, 1, row, 1, 1)
     row += 1
 
-    _make_scale("x-left", "X left", -1.0e9, 1.0e9, config.get_property("x-left"), 0.00001, digits=5)
-    _make_scale("x-right", "X right", -1.0e9, 1.0e9, config.get_property("x-right"), 0.00001, digits=5)
-    _make_scale("y-top", "Y top", -1.0e9, 1.0e9, config.get_property("y-top"), 0.00001, digits=5)
-    _make_scale("y-bottom", "Y bottom", -1.0e9, 1.0e9, config.get_property("y-bottom"), 0.00001, digits=5)
-    _make_scale("grid-spacing", "Grid lines (shorter side)", 1.0, 1000.0, config.get_property("grid-spacing"), 0.01, digits=2)
+    _make_scale("x-left", "X left", -1.0e3, 1.0e3, config.get_property("x-left"), 0.01, 0.1, digits=5)
+    _make_scale("x-right", "X right", -1.0e3, 1.0e3, config.get_property("x-right"), 0.01, 0.1, digits=5)
+    _make_scale("y-top", "Y top", -1.0e3, 1.0e3, config.get_property("y-top"), 0.01, 0.1, digits=5)
+    _make_scale("y-bottom", "Y bottom", -1.0e3, 1.0e3, config.get_property("y-bottom"), 0.01, 0.1, digits=5)
+    _make_scale("grid-spacing", "Grid length (shorter side)", 1.0, 1000.0, config.get_property("grid-spacing"), 0.1, 1.0, digits=2)
 
     def _convert_units(_widget):
         old = getattr(_convert_units, "last", "portion")
         new = units_combo.get_active_id() or "portion"
-        if old == new:
-            return
-        xv1 = scale_widgets["x-left"].get_value()
-        xv2 = scale_widgets["x-right"].get_value()
-        yv1 = scale_widgets["y-top"].get_value()
-        yv2 = scale_widgets["y-bottom"].get_value()
-        if old == "portion" and new == "pixels":
-            scale_widgets["x-left"].set_value(xv1 * max(1, width - 1))
-            scale_widgets["x-right"].set_value(xv2 * max(1, width - 1))
-            scale_widgets["y-top"].set_value(yv1 * max(1, height - 1))
-            scale_widgets["y-bottom"].set_value(yv2 * max(1, height - 1))
-        elif old == "pixels" and new == "portion":
-            scale_widgets["x-left"].set_value(xv1 / max(1, width - 1))
-            scale_widgets["x-right"].set_value(xv2 / max(1, width - 1))
-            scale_widgets["y-top"].set_value(yv1 / max(1, height - 1))
-            scale_widgets["y-bottom"].set_value(yv2 / max(1, height - 1))
+        if old != new:
+            xv1 = scale_widgets["x-left"][0].get_value()
+            xv2 = scale_widgets["x-right"][0].get_value()
+            yv1 = scale_widgets["y-top"][0].get_value()
+            yv2 = scale_widgets["y-bottom"][0].get_value()
+            if old == "portion" and new == "pixels":
+                scale_widgets["x-left"][0].set_value(xv1 * max(1, width - 1))
+                scale_widgets["x-right"][0].set_value(xv2 * max(1, width - 1))
+                scale_widgets["y-top"][0].set_value(yv1 * max(1, height - 1))
+                scale_widgets["y-bottom"][0].set_value(yv2 * max(1, height - 1))
+            elif old == "pixels" and new == "portion":
+                scale_widgets["x-left"][0].set_value(xv1 / max(1, width - 1))
+                scale_widgets["x-right"][0].set_value(xv2 / max(1, width - 1))
+                scale_widgets["y-top"][0].set_value(yv1 / max(1, height - 1))
+                scale_widgets["y-bottom"][0].set_value(yv2 / max(1, height - 1))
+
+        if new == "pixels":
+            lower, upper, step, page, digits = -1.0e4, 1.0e4, 1.0, 10.0, 0
+        else:
+            lower, upper, step, page, digits = -1.0e3, 1.0e3, 0.01, 0.1, 5
+        for key in ("x-left", "x-right", "y-top", "y-bottom"):
+            scale, spin = scale_widgets[key]
+            adj = scale.get_adjustment()
+            adj.set_lower(lower)
+            adj.set_upper(upper)
+            adj.set_step_increment(step)
+            adj.set_page_increment(page)
+            scale.set_digits(digits)
+            spin.set_digits(digits)
         _convert_units.last = new
 
     _convert_units.last = units_combo.get_active_id() or "portion"
     units_combo.connect("changed", _convert_units)
+    _convert_units(None)
 
     gradient_combo = Gtk.ComboBoxText()
     for key, label in [("HSV", "HSV"), ("grayscale", "Grayscale"), ("red-blue", "Red-Blue"), ("white-black", "White-Black"), ("custom", "Custom")]:
@@ -610,11 +624,11 @@ def _show_dialog(procedure, config, width, height):
 
     def _reset_defaults():
         code_buffer.set_text("w = z")
-        scale_widgets["x-left"].set_value(-1.0)
-        scale_widgets["x-right"].set_value(1.0)
-        scale_widgets["y-top"].set_value(1.0)
-        scale_widgets["y-bottom"].set_value(-1.0)
-        scale_widgets["grid-spacing"].set_value(3.0)
+        scale_widgets["x-left"][0].set_value(-1.0)
+        scale_widgets["x-right"][0].set_value(1.0)
+        scale_widgets["y-top"][0].set_value(1.0)
+        scale_widgets["y-bottom"][0].set_value(-1.0)
+        scale_widgets["grid-spacing"][0].set_value(4.0)
         units_combo.set_active_id("portion")
         gradient_combo.set_active_id("HSV")
         gradient_entry.set_text("#ff0000,#ffff00,#00ff00,#00ffff,#0000ff")
@@ -644,11 +658,11 @@ def _show_dialog(procedure, config, width, height):
 
     def _reset_last():
         code_buffer.set_text(last_used["code"])
-        scale_widgets["x-left"].set_value(float(last_used["x-left"]))
-        scale_widgets["x-right"].set_value(float(last_used["x-right"]))
-        scale_widgets["y-top"].set_value(float(last_used["y-top"]))
-        scale_widgets["y-bottom"].set_value(float(last_used["y-bottom"]))
-        scale_widgets["grid-spacing"].set_value(float(last_used["grid-spacing"]))
+        scale_widgets["x-left"][0].set_value(float(last_used["x-left"]))
+        scale_widgets["x-right"][0].set_value(float(last_used["x-right"]))
+        scale_widgets["y-top"][0].set_value(float(last_used["y-top"]))
+        scale_widgets["y-bottom"][0].set_value(float(last_used["y-bottom"]))
+        scale_widgets["grid-spacing"][0].set_value(float(last_used["grid-spacing"]))
         units_combo.set_active_id(last_used["x-y-units"])
         gradient_combo.set_active_id(last_used["gradient-preset"])
         gradient_entry.set_text(last_used["gradient-custom"])
@@ -678,8 +692,8 @@ def _show_dialog(procedure, config, width, height):
         start = code_buffer.get_start_iter()
         end = code_buffer.get_end_iter()
         config.set_property("code", code_buffer.get_text(start, end, True))
-        for name, scale in scale_widgets.items():
-            config.set_property(name, float(scale.get_value()))
+        for name, pair in scale_widgets.items():
+            config.set_property(name, float(pair[0].get_value()))
         config.set_property("x-y-units", units_combo.get_active_id() or "portion")
         config.set_property("gradient-preset", gradient_combo.get_active_id() or "HSV")
         config.set_property("gradient-custom", gradient_entry.get_text().strip())
@@ -741,22 +755,19 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         transform_layer = config.get_property("transform-active-layer")
         create_analysis = config.get_property("create-analysis-layers")
 
-    if str(xy_units).strip().lower() == "portion":
-        xl *= max(1, width - 1)
-        xr *= max(1, width - 1)
-        yt *= max(1, height - 1)
-        yb *= max(1, height - 1)
-
-    square_size = min(width, height)
-    axl, axr, ayt, ayb = xl, xr, yt, yb
-    if width > height:
-        x_mid = (xl + xr) / 2.0
-        x_half = (xr - xl) * (square_size / float(width)) / 2.0
-        axl, axr = x_mid - x_half, x_mid + x_half
-    elif height > width:
-        y_mid = (yt + yb) / 2.0
-        y_half = (yt - yb) * (square_size / float(height)) / 2.0
-        ayt, ayb = y_mid + y_half, y_mid - y_half
+    short_side = min(width, height)
+    x_mid = (xl + xr) / 2.0
+    y_mid = (yt + yb) / 2.0
+    if width >= height:
+        y_span = abs(yt - yb)
+        unit = y_span / max(1.0, float(short_side - 1))
+        x_span = unit * max(1.0, float(width - 1))
+    else:
+        x_span = abs(xr - xl)
+        unit = x_span / max(1.0, float(short_side - 1))
+        y_span = unit * max(1.0, float(height - 1))
+    axl, axr = x_mid - x_span / 2.0, x_mid + x_span / 2.0
+    ayt, ayb = y_mid + y_span / 2.0, y_mid - y_span / 2.0
 
     try:
         renderer_full = ConformalRenderer(
@@ -775,8 +786,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             abyss_loop_iterations,
         )
         renderer_analysis = ConformalRenderer(
-            square_size,
-            square_size,
+            width,
+            height,
             code,
             constraint,
             axl,
@@ -827,13 +838,11 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             _push_bytes_to_layer(mapped_layer, width, height, mapped_pixels)
 
         if create_analysis:
-            analysis_offset_x = (width - square_size) // 2
-            analysis_offset_y = (height - square_size) // 2
             arg_layer = Gimp.Layer.new(
                 image,
                 "Argument",
-                square_size,
-                square_size,
+                width,
+                height,
                 Gimp.ImageType.RGBA_IMAGE,
                 100.0,
                 _layer_mode("NORMAL", "NORMAL_LEGACY"),
@@ -841,8 +850,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             mod_layer = Gimp.Layer.new(
                 image,
                 "Log Modulus",
-                square_size,
-                square_size,
+                width,
+                height,
                 Gimp.ImageType.RGBA_IMAGE,
                 33.3,
                 _layer_mode("LCH_VALUE", "HSV_VALUE", "VALUE", "VALUE_LEGACY"),
@@ -850,8 +859,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             grid_layer = Gimp.Layer.new(
                 image,
                 "Checkerboard" if checkerboard else "Grid",
-                square_size,
-                square_size,
+                width,
+                height,
                 Gimp.ImageType.RGBA_IMAGE,
                 33.3,
                 _layer_mode("DARKEN_ONLY", "DARKEN_ONLY_LEGACY", "DARKEN", "DARKEN_LEGACY"),
@@ -859,13 +868,9 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             image.insert_layer(arg_layer, None, -1)
             image.insert_layer(mod_layer, None, -1)
             image.insert_layer(grid_layer, None, -1)
-            if hasattr(arg_layer, "set_offsets"):
-                arg_layer.set_offsets(analysis_offset_x, analysis_offset_y)
-                mod_layer.set_offsets(analysis_offset_x, analysis_offset_y)
-                grid_layer.set_offsets(analysis_offset_x, analysis_offset_y)
-            _push_bytes_to_layer(arg_layer, square_size, square_size, arg_pixels)
-            _push_bytes_to_layer(mod_layer, square_size, square_size, mod_pixels)
-            _push_bytes_to_layer(grid_layer, square_size, square_size, grid_pixels)
+            _push_bytes_to_layer(arg_layer, width, height, arg_pixels)
+            _push_bytes_to_layer(mod_layer, width, height, mod_pixels)
+            _push_bytes_to_layer(grid_layer, width, height, grid_pixels)
 
         comment = (
             f"# conformal {CONF_VERSION}\n"
@@ -925,7 +930,7 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_double_argument("x-right", "X r_ight", "Right bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("y-top", "Y _top", "Top bound of source plane", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("y-bottom", "Y bo_ttom", "Bottom bound of source plane", -1.0e9, 1.0e9, -1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("grid-spacing", "Grid _lines (shorter side)", "Number of grid lines on the shorter axis", 1.0, 1000.0, 3.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("grid-spacing", "Grid _length (shorter side)", "Number of grid lines on the shorter axis", 1.0, 1000.0, 4.0, GObject.ParamFlags.READWRITE)
         units_choice = Gimp.Choice.new()
         units_choice.add("portion", 0, _("Portion"), "Normalized image portion units")
         units_choice.add("pixels", 1, _("Pixels"), "Absolute pixel units")
