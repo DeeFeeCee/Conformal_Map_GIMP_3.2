@@ -13,16 +13,17 @@ Open an image, select a layer, then run **Filters → Distorts → Conformal Map
 Main controls:
 
 - **Formula**: Python code assigning `w` from `z`.
-- **X left / X right / Y top / Y bottom / Grid length (shorter side)**: Numeric map controls via slider + text entry.
+- **Coordinate system**: Relative coordinates are defined as (0,0) at the image's center & (1,y) or (x,1) at whichever is the shortest edge.
+- **Center X / Center Y / Zoom / Grid length (shorter side)**: Numeric map controls via slider + text entry.
 - **Palette / Custom palette**: Domain coloring options.
 - **Abyss mode / Wrap iterations**: Out-of-bounds sampling behavior.
-- **Reset Defaults / Reset Last Used**: Quickly restore either factory defaults or the values from when the dialog was opened.
-- **Transform active layer**: Creates transformed output layer.
+- **Transform active layer**: Creates transformed output layer from active layer.
 - **Add analysis layers**: Adds `Argument`, `Log Modulus`, and `Grid`/`Checkerboard` layers.
 - **Checkerboard**: Uses checkerboard analysis layer instead of line grid.
+- **Grid length (shorter side)**: Creates a grid that is x-units wide.
+- **Logarithm base**: The base used by the log modulus.
 
 ## Formula notes
-
 - `^` is accepted as exponentiation and converted to `**`.
 - `i` is interpreted as the imaginary unit (`j`).
 - `2z` style shorthand is normalized to `2*z`.
