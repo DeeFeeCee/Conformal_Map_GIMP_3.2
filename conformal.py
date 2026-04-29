@@ -97,7 +97,7 @@ class ConformalRenderer:
         self.checkerboard = bool(checkerboard)
         self.gradient = gradient or "HSV"
         self.abyss_mode = (abyss_mode or "transparent").strip().lower()
-        self.abyss_loop_iterations = max(1, int(abyss_loop_iterations))
+        self.abyss_loop_iterations = max(1, int(abyss_loop_iterations)) - 1
         self.log_base = str(log_base or "2")
         self._validate_gradient_setting()
 
@@ -113,6 +113,29 @@ class ConformalRenderer:
 
         self._compiled_code = compile(self.code, "conformal-code", "exec")
         self._compiled_constraint = compile(self.constraint, "conformal-constraint", "exec")
+
+    @staticmethod
+    def _validate_code_ast(snippet):
+        tree = ast.parse(snippet, mode="exec")
+        blocked = (
+            ast.Import,
+            ast.ImportFrom,
+            ast.With,
+            ast.AsyncWith,
+            ast.Try,
+            ast.Raise,
+            ast.Global,
+            ast.Nonlocal,
+            ast.Delete,
+            ast.ClassDef,
+            ast.Lambda,
+            ast.Await,
+            ast.Yield,
+            ast.YieldFrom,
+        )
+        for node in ast.walk(tree):
+            if isinstance(node, blocked):
+                raise ValueError(f"Unsupported code construct: {type(node).__name__}")
 
     @staticmethod
     def _normalize_code(code):
@@ -140,29 +163,6 @@ class ConformalRenderer:
         if not has_w_assignment:
             snippet = f"w = ({snippet})"
         return snippet
-
-    @staticmethod
-    def _validate_code_ast(snippet):
-        tree = ast.parse(snippet, mode="exec")
-        blocked = (
-            ast.Import,
-            ast.ImportFrom,
-            ast.With,
-            ast.AsyncWith,
-            ast.Try,
-            ast.Raise,
-            ast.Global,
-            ast.Nonlocal,
-            ast.Delete,
-            ast.ClassDef,
-            ast.Lambda,
-            ast.Await,
-            ast.Yield,
-            ast.YieldFrom,
-        )
-        for node in ast.walk(tree):
-            if isinstance(node, blocked):
-                raise ValueError(f"Unsupported code construct: {type(node).__name__}")
 
     @staticmethod
     def _clamp_u8(x):
@@ -294,13 +294,13 @@ class ConformalRenderer:
 
         if valid:
             try:
-                logw = cmath.log(w)
+                logw = cmath.log(w / 2) #2 divisor is needed to normalize log to short side
                 arg = logw.imag
                 if arg < 0.0:
                     arg += self._two_pi
                 arg_norm = arg / self._two_pi
                 mod = (logw.real / self._log) % 1.0
-                sqr = int(math.floor(w.imag / self.grid)) + int(math.floor(w.real / self.grid))
+                sqr = int(math.floor(w.real / self.grid)) + int(math.floor(w.imag / self.grid))
                 sqr = sqr % 2
                 x_mod = abs((w.real / self.grid) - round(w.real / self.grid))
                 y_mod = abs((w.imag / self.grid) - round(w.imag / self.grid))
@@ -545,7 +545,7 @@ def _show_dialog(procedure, config, width, height):
 
     _make_scale("center-x", "Center X", -1.0e3, 1.0e3, config.get_property("center-x"), 0.01, 0.1, digits=5, tooltip="Center of the mapped coordinate system.")
     _make_scale("center-y", "Center Y", -1.0e3, 1.0e3, config.get_property("center-y"), 0.01, 0.1, digits=5, tooltip="Center of the mapped coordinate system.")
-    _make_scale("zoom", "Zoom", -1.0e3, 1.0e3, config.get_property("zoom"), 0.01, 0.1, digits=5, tooltip="Zoom factor. Higher values zoom in.")
+    _make_scale("zoom", "Zoom", 1.0e-5, 1.0e3, config.get_property("zoom"), 0.01, 0.1, digits=5, tooltip="Zoom factor. Higher values zoom in.")
 
     def _convert_units(_widget):
         old = getattr(_convert_units, "last", "relative")
@@ -671,7 +671,7 @@ def _show_dialog(procedure, config, width, height):
     log_combo.set_active_id(str(config.get_property("log-base")))
     if log_combo.get_active_id() is None:
         log_combo.set_active_id("2")
-    log_label = Gtk.Label(label="Logarithm", xalign=0.0)
+    log_label = Gtk.Label(label="Logarithm base", xalign=0.0)
     log_label.set_tooltip_text("Base used for logarithm modulus shading.")
     grid.attach(log_label, 0, row, 1, 1)
     log_combo.set_tooltip_text("Select modulus base.")
@@ -679,18 +679,24 @@ def _show_dialog(procedure, config, width, height):
     row += 1
 
     def _sync():
-        checker_check.set_sensitive(analysis_check.get_active())
         gradient_entry.set_sensitive(gradient_combo.get_active_id() == "custom")
         pick_btn.set_sensitive(gradient_combo.get_active_id() == "custom")
-        abyss_spin.set_sensitive(abyss_combo.get_active_id() in ("loop", "reflect"))
+        # inconsistent behavior, doesn't disable/re-enable until abyss is toggled
+        abyss_label.set_sensitive(transform_check.get_active())
+        abyss_combo.set_sensitive(transform_check.get_active())
+        abyss_spin.set_sensitive(transform_check.get_active() and abyss_combo.get_active_id() in ("loop", "reflect"))
+        checker_check.set_sensitive(analysis_check.get_active())
         grid_enabled = analysis_check.get_active()
         scale_labels["grid-spacing"].set_sensitive(grid_enabled)
         scale_widgets["grid-spacing"][0].set_sensitive(grid_enabled)
         scale_widgets["grid-spacing"][1].set_sensitive(grid_enabled)
+        log_label.set_sensitive(analysis_check.get_active())
+        log_combo.set_sensitive(analysis_check.get_active())
 
-    analysis_check.connect("toggled", lambda *_a: _sync())
     gradient_combo.connect("changed", lambda *_a: _sync())
+    transform_check.connect("toggled", lambda *_a: _sync())
     abyss_combo.connect("changed", lambda *_a: _sync())
+    analysis_check.connect("toggled", lambda *_a: _sync())
     _sync()
 
     def _reset_defaults():
@@ -980,7 +986,7 @@ class ConformalPlugin(Gimp.PlugIn):
             "Transforms the active layer through a conformal map and can optionally create argument/modulus/grid analysis layers.",
             name,
         )
-        procedure.set_attribution("Michael J Gruber", "Ported for GIMP 3.2", "2026")
+        procedure.set_attribution("Michael J Gruber, DeeFeeCee", "Ported for GIMP 3.2", "2026")
 
         procedure.add_string_argument(
             "code",
