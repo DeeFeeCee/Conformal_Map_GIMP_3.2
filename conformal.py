@@ -72,10 +72,14 @@ class ConformalRenderer:
         height,
         code,
         constraint,
-        xl,
-        xr,
-        yt,
-        yb,
+        domain_xl,
+        domain_xr,
+        domain_yt,
+        domain_yb,
+        source_xl,
+        source_xr,
+        source_yt,
+        source_yb,
         grid,
         checkerboard,
         gradient,
@@ -87,12 +91,18 @@ class ConformalRenderer:
         self.height = max(1, int(height))
         self.code = self._normalize_code(code)
         self.constraint = constraint
-        self.xl = float(xl)
-        self.xr = float(xr)
-        self.yt = float(yt)
-        self.yb = float(yb)
+        # Store the zoomed output/domain viewport used to compute z.
+        self.domain_xl = float(domain_xl)
+        self.domain_xr = float(domain_xr)
+        self.domain_yt = float(domain_yt)
+        self.domain_yb = float(domain_yb)
+        # Store the unzoomed source/image viewport used to sample evaluated w.
+        self.source_xl = float(source_xl)
+        self.source_xr = float(source_xr)
+        self.source_yt = float(source_yt)
+        self.source_yb = float(source_yb)
         self.grid_lines = max(float(grid), 1.0)
-        shorter_span = max(min(abs(self.xr - self.xl), abs(self.yt - self.yb)), 1e-9)
+        shorter_span = max(min(abs(self.source_xr - self.source_xl), abs(self.source_yt - self.source_yb)), 1e-9)
         self.grid = max(shorter_span / self.grid_lines, 1e-9)
         self.checkerboard = bool(checkerboard)
         self.gradient = gradient or "HSV"
@@ -101,8 +111,12 @@ class ConformalRenderer:
         self.log_base = str(log_base or "2")
         self._validate_gradient_setting()
 
-        self._sx = (self.width - 1.0) / (self.xr - self.xl)
-        self._sy = (self.height - 1.0) / (self.yt - self.yb)
+        # Build separate output/domain scales for pixel-to-z conversion.
+        self._domain_sx = (self.width - 1.0) / (self.domain_xr - self.domain_xl)
+        self._domain_sy = (self.height - 1.0) / (self.domain_yt - self.domain_yb)
+        # Build separate source/image scales for w-to-source-pixel conversion.
+        self._source_sx = (self.width - 1.0) / (self.source_xr - self.source_xl)
+        self._source_sy = (self.height - 1.0) / (self.source_yt - self.source_yb)
         self._two_pi = 2.0 * math.pi
         if self.log_base == "e":
             self._log = 1.0
@@ -142,10 +156,8 @@ class ConformalRenderer:
         snippet = (code or "").strip()
         if not snippet:
             return "w = z"
-        # Map common math notation to Python.
+        # Map common exponent notation to Python.
         snippet = snippet.replace("^", "**")
-        # Allow shorthand multiplication like 2z -> 2*z.
-        snippet = re.sub(r"(\d+(?:\.\d+)?)(\s*)(z)\b", r"\1*\3", snippet)
         # Interpret "i" as the imaginary unit, including forms like 0.2i.
         snippet = re.sub(r"(?<=\d)i\b", "j", snippet)
         snippet = re.sub(r"\bi\b", "(1j)", snippet)
@@ -363,9 +375,11 @@ class ConformalRenderer:
 
         for row in range(self.height):
             base = row * self.width * 4
-            imag = self.yt - (row / self._sy)
+            # Convert the output row through the zoomed domain viewport.
+            imag = self.domain_yt - (row / self._domain_sy)
             for col in range(self.width):
-                z = col / self._sx + self.xl + 1j * imag
+                # Convert the output column through the zoomed domain viewport.
+                z = col / self._domain_sx + self.domain_xl + 1j * imag
                 valid, w, arg_norm, mod, sqr, grid_line = self._evaluate_point(z)
 
                 if not valid:
@@ -378,8 +392,9 @@ class ConformalRenderer:
                     mod_px = self._mod_shade(mod)
                     grid_px = self._grid_pixel(sqr if self.checkerboard else grid_line)
                     if source_pixels is not None:
-                        sx = int(round((w.real - self.xl) * self._sx))
-                        sy = int(round((self.yt - w.imag) * self._sy))
+                        # Convert evaluated w through the unzoomed source/image viewport.
+                        sx = int(round((w.real - self.source_xl) * self._source_sx))
+                        sy = int(round((self.source_yt - w.imag) * self._source_sy))
                         if 0 <= sx < self.width and 0 <= sy < self.height:
                             sidx = (sy * self.width + sx) * 4
                             mapped_px = tuple(source_pixels[sidx:sidx + 4])
@@ -493,13 +508,31 @@ def _show_dialog(procedure, config, width, height):
     grid.attach(code_label, 0, row, 1, 1)
     code_view = Gtk.TextView()
     code_view.set_monospace(True)
-    code_view.set_tooltip_text("Supports shorthand like 2z, i, and ^.")
+    code_view.set_tooltip_text("Use explicit multiplication, for example n*z. Use Python syntax for iterative functions.")
     code_buffer = code_view.get_buffer()
     code_buffer.set_text(config.get_property("code"))
     sw = Gtk.ScrolledWindow()
     sw.set_min_content_height(120)
     sw.add(code_view)
     grid.attach(sw, 1, row, 3, 1)
+
+    syntax_help = Gtk.Expander(label="Syntax help")
+    syntax_help.set_expanded(False)
+    syntax_label = Gtk.Label(
+        label=(
+            "Multiplication must be explicit: type n*z, not nz or 2z.\n"
+            "Use Python operators such as z**2 or z^2 for powers.\n"
+            "Iterative functions can use helper code, for example:\n"
+            "w = z\n"
+            "for _ in range(8):\n"
+            "    w = w*w + z"
+        )
+    )
+    syntax_label.set_xalign(0.0)
+    syntax_label.set_yalign(0.0)
+    syntax_label.set_line_wrap(True)
+    syntax_help.add(syntax_label)
+    grid.attach(syntax_help, 4, row, 1, 1)
     row += 1
 
     scale_widgets = {}
@@ -857,10 +890,20 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     x_half_span = short_half_span * (width / short_side)
     y_half_span = short_half_span * (height / short_side)
 
-    xl = center_x - x_half_span
-    xr = center_x + x_half_span
-    yt = center_y + y_half_span
-    yb = center_y - y_half_span
+    # Build the unzoomed source/image viewport for converting w to source pixels.
+    source_short_half_span = 2.0
+    source_x_half_span = source_short_half_span * (width / short_side)
+    source_y_half_span = source_short_half_span * (height / short_side)
+    source_xl = center_x - source_x_half_span
+    source_xr = center_x + source_x_half_span
+    source_yt = center_y + source_y_half_span
+    source_yb = center_y - source_y_half_span
+
+    # Build the zoomed output/domain viewport for converting output pixels to z.
+    domain_xl = center_x - x_half_span
+    domain_xr = center_x + x_half_span
+    domain_yt = center_y + y_half_span
+    domain_yb = center_y - y_half_span
 
     try:
         renderer_full = ConformalRenderer(
@@ -868,10 +911,14 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             height,
             code,
             constraint,
-            xl,
-            xr,
-            yt,
-            yb,
+            domain_xl,
+            domain_xr,
+            domain_yt,
+            domain_yb,
+            source_xl,
+            source_xr,
+            source_yt,
+            source_yb,
             grid,
             checkerboard,
             gradient,
@@ -962,7 +1009,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             f"# conformal {CONF_VERSION}\n"
             f"code = \"\"\"\n{code}\n\"\"\"\n"
             f"constraint = \"\"\"\n{constraint}\n\"\"\"\n"
-            f"xl = {xl}\nxr = {xr}\nyt = {yt}\nyb = {yb}\n"
+            f"domain_xl = {domain_xl}\ndomain_xr = {domain_xr}\ndomain_yt = {domain_yt}\ndomain_yb = {domain_yb}\n"
+            f"source_xl = {source_xl}\nsource_xr = {source_xr}\nsource_yt = {source_yt}\nsource_yb = {source_yb}\n"
             f"grid = {grid}\ncheckerboard = {int(checkerboard)}\n"
             f"gradient = {gradient}\n"
             f"abyss_mode = {abyss_mode}\nabyss_loop_iterations = {abyss_loop_iterations}\n"
@@ -1008,7 +1056,7 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_string_argument(
             "code",
             "_Formula",
-            "Python code assigning w; supports helper functions/recursion, '^' exponentiation, and 'i' as imaginary unit",
+            "Python code assigning w; multiplication must be explicit, for example n*z",
             "w = z",
             GObject.ParamFlags.READWRITE,
         )
