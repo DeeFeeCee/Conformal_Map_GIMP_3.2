@@ -158,8 +158,7 @@ class ConformalRenderer:
             return "w = z"
         # Map common exponent notation to Python.
         snippet = snippet.replace("^", "**")
-        # Interpret "i" as the imaginary unit, including forms like 0.2i.
-        snippet = re.sub(r"(?<=\d)i\b", "j", snippet)
+        # Interpret standalone "i" as the imaginary unit; coefficients must use explicit multiplication, e.g. 0.2*i.
         snippet = re.sub(r"\bi\b", "(1j)", snippet)
         ConformalRenderer._validate_code_ast(snippet)
         parsed = ast.parse(snippet, mode="exec")
@@ -306,8 +305,8 @@ class ConformalRenderer:
 
         if valid:
             try:
-                # 2 divisor is needed to normalize log to short side
-                logw = cmath.log(w / 2)
+                # Use coordinates where the source short edge spans 1 unit.
+                logw = cmath.log(w)
                 arg = logw.imag
                 if arg < 0.0:
                     arg += self._two_pi
@@ -522,6 +521,7 @@ def _show_dialog(procedure, config, width, height):
         label=(
             "Multiplication must be explicit: type n*z, not nz or 2z.\n"
             "Use Python operators such as z**2 or z^2 for powers.\n"
+            "Use 0.2*i for imaginary coefficients, not 0.2i.\n"
             "Iterative functions can use helper code, for example:\n"
             "w = z\n"
             "for _ in range(8):\n"
@@ -587,15 +587,15 @@ def _show_dialog(procedure, config, width, height):
         if old != new:
             cx = scale_widgets["center-x"][0].get_value()
             cy = scale_widgets["center-y"][0].get_value()
-            short_half = min(width, height) / 2.0
+            short_span_px = min(width, height)
             img_cx = (width - 1) / 2.0
             img_cy = (height - 1) / 2.0
             if old == "relative" and new == "pixels":
-                scale_widgets["center-x"][0].set_value(img_cx + cx * short_half)
-                scale_widgets["center-y"][0].set_value(img_cy - cy * short_half)
+                scale_widgets["center-x"][0].set_value(img_cx + cx * short_span_px)
+                scale_widgets["center-y"][0].set_value(img_cy - cy * short_span_px)
             elif old == "pixels" and new == "relative":
-                scale_widgets["center-x"][0].set_value((cx - img_cx) / max(short_half, 1e-9))
-                scale_widgets["center-y"][0].set_value((img_cy - cy) / max(short_half, 1e-9))
+                scale_widgets["center-x"][0].set_value((cx - img_cx) / max(short_span_px, 1e-9))
+                scale_widgets["center-y"][0].set_value((img_cy - cy) / max(short_span_px, 1e-9))
 
         if new == "pixels":
             lower, upper, step, page, digits = -1.0e4, 1.0e4, 0.5, 10.0, 4
@@ -879,19 +879,19 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     short_side = float(max(1, min(width, height)))
     img_cx = (width - 1) / 2.0
     img_cy = (height - 1) / 2.0
-    short_half_px = short_side / 2.0
+    short_span_px = short_side
 
     if coord_system == "pixels":
-        center_x = (center_x - img_cx) / max(short_half_px, 1e-9)
-        center_y = (img_cy - center_y) / max(short_half_px, 1e-9)
+        center_x = (center_x - img_cx) / max(short_span_px, 1e-9)
+        center_y = (img_cy - center_y) / max(short_span_px, 1e-9)
 
     safe_zoom = max(abs(zoom), 1e-9)
-    short_half_span = 2.0 / safe_zoom
-    x_half_span = short_half_span * (width / short_side)
-    y_half_span = short_half_span * (height / short_side)
+    domain_short_half_span = 0.5 / safe_zoom
+    domain_x_half_span = domain_short_half_span * (width / short_side)
+    domain_y_half_span = domain_short_half_span * (height / short_side)
 
     # Build the unzoomed source/image viewport for converting w to source pixels.
-    source_short_half_span = 2.0
+    source_short_half_span = 0.5
     source_x_half_span = source_short_half_span * (width / short_side)
     source_y_half_span = source_short_half_span * (height / short_side)
     source_xl = center_x - source_x_half_span
@@ -900,10 +900,10 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     source_yb = center_y - source_y_half_span
 
     # Build the zoomed output/domain viewport for converting output pixels to z.
-    domain_xl = center_x - x_half_span
-    domain_xr = center_x + x_half_span
-    domain_yt = center_y + y_half_span
-    domain_yb = center_y - y_half_span
+    domain_xl = center_x - domain_x_half_span
+    domain_xr = center_x + domain_x_half_span
+    domain_yt = center_y + domain_y_half_span
+    domain_yb = center_y - domain_y_half_span
 
     try:
         renderer_full = ConformalRenderer(
