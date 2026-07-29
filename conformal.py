@@ -305,7 +305,7 @@ class ConformalRenderer:
 
         if valid:
             try:
-                # Use coordinates where the source short edge spans 1 unit.
+                # Use source coordinates where the center-to-short-edge distance is 1 unit.
                 logw = cmath.log(w)
                 arg = logw.imag
                 if arg < 0.0:
@@ -587,15 +587,15 @@ def _show_dialog(procedure, config, width, height):
         if old != new:
             cx = scale_widgets["center-x"][0].get_value()
             cy = scale_widgets["center-y"][0].get_value()
-            short_span_px = min(width, height)
+            short_half_px = min(width, height) / 2.0
             img_cx = (width - 1) / 2.0
             img_cy = (height - 1) / 2.0
             if old == "relative" and new == "pixels":
-                scale_widgets["center-x"][0].set_value(img_cx + cx * short_span_px)
-                scale_widgets["center-y"][0].set_value(img_cy - cy * short_span_px)
+                scale_widgets["center-x"][0].set_value(img_cx + cx * short_half_px)
+                scale_widgets["center-y"][0].set_value(img_cy - cy * short_half_px)
             elif old == "pixels" and new == "relative":
-                scale_widgets["center-x"][0].set_value((cx - img_cx) / max(short_span_px, 1e-9))
-                scale_widgets["center-y"][0].set_value((img_cy - cy) / max(short_span_px, 1e-9))
+                scale_widgets["center-x"][0].set_value((cx - img_cx) / max(short_half_px, 1e-9))
+                scale_widgets["center-y"][0].set_value((img_cy - cy) / max(short_half_px, 1e-9))
 
         if new == "pixels":
             lower, upper, step, page, digits = -1.0e4, 1.0e4, 0.5, 10.0, 4
@@ -879,19 +879,19 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     short_side = float(max(1, min(width, height)))
     img_cx = (width - 1) / 2.0
     img_cy = (height - 1) / 2.0
-    short_span_px = short_side
+    short_half_px = short_side / 2.0
 
     if coord_system == "pixels":
-        center_x = (center_x - img_cx) / max(short_span_px, 1e-9)
-        center_y = (img_cy - center_y) / max(short_span_px, 1e-9)
+        center_x = (center_x - img_cx) / max(short_half_px, 1e-9)
+        center_y = (img_cy - center_y) / max(short_half_px, 1e-9)
 
     safe_zoom = max(abs(zoom), 1e-9)
-    domain_short_half_span = 0.5 / safe_zoom
+    domain_short_half_span = 1.0 / safe_zoom
     domain_x_half_span = domain_short_half_span * (width / short_side)
     domain_y_half_span = domain_short_half_span * (height / short_side)
 
     # Build the unzoomed source/image viewport for converting w to source pixels.
-    source_short_half_span = 0.5
+    source_short_half_span = 1.0
     source_x_half_span = source_short_half_span * (width / short_side)
     source_y_half_span = source_short_half_span * (height / short_side)
     source_xl = center_x - source_x_half_span
