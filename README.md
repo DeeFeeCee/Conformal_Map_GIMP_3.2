@@ -21,7 +21,7 @@ Main controls:
 - **Add analysis layers**: Adds `Argument`, `Log Modulus`, and `Grid`/`Checkerboard` layers.
 - **Checkerboard**: Uses checkerboard analysis layer instead of line grid.
 - **Grid length (shorter side)**: Creates a grid that is x-units wide.
-- **Logarithm base**: The base used by the log modulus.
+- **Log modulus base**: The base used by the log modulus.
 
 ## Formula notes
 - `^` is accepted as exponentiation and converted to `**`.
