@@ -37,7 +37,7 @@ from gi.repository import Gimp
 from gi.repository import GLib
 from gi.repository import GObject
 
-CONF_VERSION = "0.3.8"
+CONF_VERSION = "0.3.9"
 PROC_RENDER = "plug-in-conformal-render"
 _UI_INITIALIZED = False
 GRADIENT_ID_MAP = {0: "HSV", 1: "grayscale", 2: "red-blue", 3: "white-black", 4: "custom"}
@@ -62,7 +62,7 @@ for _name in dir(cmath):
 
 
 class ConformalRenderer:
-    #Pixel renderer independent from GIMP glue code.
+    # Pixel renderer independent from GIMP glue code.
 
     QUANT = 4096
 
@@ -254,13 +254,13 @@ class ConformalRenderer:
 
     def _mod_shade(self, mod):
         shade = self._clamp_u8(mod * 255.0)
-        return (shade, shade, shade, 96)
+        return (shade, shade, shade, 255)
 
     def _grid_pixel(self, sqr):
         if self.checkerboard:
             v = 255 if sqr else 0
-            return (v, v, v, 80)
-        return (0, 0, 0, 80 if sqr else 0)
+            return (v, v, v, 255)
+        return (0, 0, 0, 255 if sqr else 0)
 
     def _mirror_coord(self, value, size):
         if size <= 1:
@@ -294,7 +294,8 @@ class ConformalRenderer:
 
         if valid:
             try:
-                logw = cmath.log(w / 2) #2 divisor is needed to normalize log to short side
+                # 2 divisor is needed to normalize log to short side
+                logw = cmath.log(w / 2)
                 arg = logw.imag
                 if arg < 0.0:
                     arg += self._two_pi
@@ -644,11 +645,14 @@ def _show_dialog(procedure, config, width, height):
     transform_check.set_active(bool(config.get_property("transform-active-layer")))
     analysis_check = Gtk.CheckButton(label="Add analysis layers")
     analysis_check.set_active(bool(config.get_property("create-analysis-layers")))
+    group_check = Gtk.CheckButton(label="Group analysis layers (has visual bug)")
+    group_check.set_active(bool(config.get_property("analysis-group")))
     checker_check = Gtk.CheckButton(label="Checkerboard")
     checker_check.set_active(bool(config.get_property("checkerboard")))
     grid.attach(transform_check, 0, row, 2, 1)
     grid.attach(analysis_check, 2, row, 2, 1)
     row += 1
+    grid.attach(group_check, 0, row, 2, 1)
     grid.attach(checker_check, 2, row, 2, 1)
     row += 1
 
@@ -671,7 +675,7 @@ def _show_dialog(procedure, config, width, height):
     log_combo.set_active_id(str(config.get_property("log-base")))
     if log_combo.get_active_id() is None:
         log_combo.set_active_id("2")
-    log_label = Gtk.Label(label="Logarithm base", xalign=0.0)
+    log_label = Gtk.Label(label="Log modulus base", xalign=0.0)
     log_label.set_tooltip_text("Base used for logarithm modulus shading.")
     grid.attach(log_label, 0, row, 1, 1)
     log_combo.set_tooltip_text("Select modulus base.")
@@ -681,7 +685,6 @@ def _show_dialog(procedure, config, width, height):
     def _sync():
         gradient_entry.set_sensitive(gradient_combo.get_active_id() == "custom")
         pick_btn.set_sensitive(gradient_combo.get_active_id() == "custom")
-        # inconsistent behavior, doesn't disable/re-enable until abyss is toggled
         abyss_label.set_sensitive(transform_check.get_active())
         abyss_combo.set_sensitive(transform_check.get_active())
         abyss_spin.set_sensitive(transform_check.get_active() and abyss_combo.get_active_id() in ("loop", "reflect"))
@@ -692,6 +695,7 @@ def _show_dialog(procedure, config, width, height):
         scale_widgets["grid-spacing"][1].set_sensitive(grid_enabled)
         log_label.set_sensitive(analysis_check.get_active())
         log_combo.set_sensitive(analysis_check.get_active())
+        group_check.set_sensitive(analysis_check.get_active())
 
     gradient_combo.connect("changed", lambda *_a: _sync())
     transform_check.connect("toggled", lambda *_a: _sync())
@@ -714,6 +718,7 @@ def _show_dialog(procedure, config, width, height):
         transform_check.set_active(True)
         analysis_check.set_active(True)
         checker_check.set_active(False)
+        group_check.set_active(False)
         _sync()
 
     last_used = {
@@ -731,6 +736,7 @@ def _show_dialog(procedure, config, width, height):
         "transform-active-layer": transform_check.get_active(),
         "create-analysis-layers": analysis_check.get_active(),
         "checkerboard": checker_check.get_active(),
+        "analysis-group": group_check.get_active(),
     }
 
     def _reset_last():
@@ -748,6 +754,7 @@ def _show_dialog(procedure, config, width, height):
         transform_check.set_active(bool(last_used["transform-active-layer"]))
         analysis_check.set_active(bool(last_used["create-analysis-layers"]))
         checker_check.set_active(bool(last_used["checkerboard"]))
+        group_check.set_active(bool(last_used["analysis-group"]))
         _sync()
 
     dialog.show_all()
@@ -780,6 +787,7 @@ def _show_dialog(procedure, config, width, height):
         config.set_property("transform-active-layer", bool(transform_check.get_active()))
         config.set_property("create-analysis-layers", bool(analysis_check.get_active()))
         config.set_property("checkerboard", bool(checker_check.get_active()))
+        config.set_property("analysis-group", bool(group_check.get_active()))
     dialog.destroy()
     return accepted
 
@@ -808,6 +816,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     log_base = str(config.get_property("log-base") or "2")
     transform_layer = config.get_property("transform-active-layer")
     create_analysis = config.get_property("create-analysis-layers")
+    group_analysis = config.get_property("analysis-group")
 
     if run_mode == Gimp.RunMode.INTERACTIVE:
         if not _show_dialog(procedure, config, width, height):
@@ -832,6 +841,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         log_base = str(config.get_property("log-base") or "2")
         transform_layer = config.get_property("transform-active-layer")
         create_analysis = config.get_property("create-analysis-layers")
+        group_analysis = config.get_property("analysis-group")
 
     short_side = float(max(1, min(width, height)))
     img_cx = (width - 1) / 2.0
@@ -892,11 +902,13 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
 
     image.undo_group_start()
+    # Gets active layer's name & appends space if name == Layer (default layer name in English)
+    layer_name = "" if source.get_name() == "Layer" else source.get_name() + " "
     try:
         if transform_layer and mapped_pixels is not None:
             mapped_layer = Gimp.Layer.new(
                 image,
-                "Conformal Transform",
+                layer_name + " Conformal Transform",
                 width,
                 height,
                 Gimp.ImageType.RGBA_IMAGE,
@@ -907,9 +919,14 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             _push_bytes_to_layer(mapped_layer, width, height, mapped_pixels)
 
         if create_analysis:
+            if group_analysis:
+                analysis_group = Gimp.GroupLayer.new(image, layer_name + "Analysis")
+                image.insert_layer(analysis_group, None, -1)
+            else:
+                analysis_group = None
             arg_layer = Gimp.Layer.new(
                 image,
-                "Argument",
+                layer_name + "Argument",
                 width,
                 height,
                 Gimp.ImageType.RGBA_IMAGE,
@@ -918,25 +935,25 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             )
             mod_layer = Gimp.Layer.new(
                 image,
-                "Log Modulus",
+                layer_name + "Log Modulus",
                 width,
                 height,
                 Gimp.ImageType.RGBA_IMAGE,
-                33.3,
+                20,
                 _layer_mode("DARKEN_ONLY", "DARKEN_ONLY_LEGACY", "DARKEN", "DARKEN_LEGACY"),
             )
             grid_layer = Gimp.Layer.new(
                 image,
-                "Checkerboard" if checkerboard else "Grid",
+                layer_name + "Checkerboard" if checkerboard else layer_name + "Grid",
                 width,
                 height,
                 Gimp.ImageType.RGBA_IMAGE,
-                33.3,
+                20,
                 _layer_mode("DARKEN_ONLY", "DARKEN_ONLY_LEGACY", "DARKEN", "DARKEN_LEGACY"),
             )
-            image.insert_layer(arg_layer, None, -1)
-            image.insert_layer(mod_layer, None, -1)
-            image.insert_layer(grid_layer, None, -1)
+            image.insert_layer(arg_layer, analysis_group, -1)
+            image.insert_layer(mod_layer, analysis_group, -1)
+            image.insert_layer(grid_layer, analysis_group, -1)
             _push_bytes_to_layer(arg_layer, width, height, arg_pixels)
             _push_bytes_to_layer(mod_layer, width, height, mod_pixels)
             _push_bytes_to_layer(grid_layer, width, height, grid_pixels)
@@ -1056,6 +1073,7 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_choice_argument("log-base", "_Logarithm", "Logarithm base for modulus layer", choices_log, "2", GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("transform-active-layer", "_Transform active layer", "Transform pixels in the active layer directly", True, GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("create-analysis-layers", "Add _analysis layers", "Create argument/modulus/grid helper layers", True, GObject.ParamFlags.READWRITE)
+        procedure.add_boolean_argument("analysis-group", "_Group analysis layers (has visual bug)", "You may need to toggle the layers' visibility for them to appear correctly", False, GObject.ParamFlags.READWRITE)
 
         return procedure
 
