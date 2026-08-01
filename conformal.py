@@ -563,7 +563,7 @@ def _show_dialog(procedure, config, width, height):
         scale_labels[name] = label
         row += 1
 
-    coord_expander = Gtk.Expander(label="Coordinate settings")
+    coord_expander = Gtk.Expander(label="Coordinate/Scale settings")
     coord_expander.set_expanded(False)
     coord_grid = Gtk.Grid(column_spacing=8, row_spacing=8, margin=8)
     coord_expander.add(coord_grid)
@@ -615,10 +615,10 @@ def _show_dialog(procedure, config, width, height):
     coord_grid.attach(scale_basis_check, 2, coord_row, 3, 1)
     coord_row += 1
 
-    _make_coord_scale("center-x", "Center X", -1.0e3, 1.0e3, config.get_property("center-x"), 0.01, 0.1, digits=5, tooltip="Center of the mapped coordinate system.")
-    _make_coord_scale("center-y", "Center Y", -1.0e3, 1.0e3, config.get_property("center-y"), 0.01, 0.1, digits=5, tooltip="Center of the mapped coordinate system.")
-    _make_coord_scale("zoom", "Zoom", 1.0e-5, 1.0e3, config.get_property("zoom"), 0.01, 0.1, digits=5, tooltip="Zoom factor. Higher values zoom in.")
-    _make_coord_scale("scale", "Scale", 1.0e-5, 1.0e3, config.get_property("scale"), 0.01, 0.1, digits=5, tooltip="Coordinate half-length assigned to the selected image side before zoom.")
+    _make_coord_scale("scale", "Input scale", 1.0e-5, 1.0e3, config.get_property("scale"), 0.01, 0.1, digits=5, tooltip="Coordinate assigned to opposite sides of image (half of short/long side). Applied before zoom.")
+    _make_coord_scale("center-x", "Center X", -1.0e3, 1.0e3, config.get_property("center-x"), 0.01, 0.1, digits=5, tooltip="Center width of the mapped coordinate system.")
+    _make_coord_scale("center-y", "Center Y", -1.0e3, 1.0e3, config.get_property("center-y"), 0.01, 0.1, digits=5, tooltip="Center height of the mapped coordinate system.")
+    _make_coord_scale("zoom", "Output zoom", 1.0e-5, 1.0e3, config.get_property("zoom"), 0.01, 0.1, digits=5, tooltip="Zoom factor. Higher values zoom in.")
 
     def _convert_units(_widget):
         old = getattr(_convert_units, "last", "relative")
@@ -672,9 +672,9 @@ def _show_dialog(procedure, config, width, height):
     gradient_entry = Gtk.Entry()
     gradient_entry.set_text(config.get_property("gradient-custom"))
     custom_palette_label = Gtk.Label(label="Custom palette", xalign=0.0)
-    custom_palette_label.set_tooltip_text("Comma-separated #RRGGBB stops for Custom palette.")
+    custom_palette_label.set_tooltip_text("Comma-separated #RRGGBB values for custom colors. Used when Custom palette is selected.")
     grid.attach(custom_palette_label, 2, row, 1, 1)
-    gradient_entry.set_tooltip_text("Example: #ff0000,#00ff00,#0000ff")
+    gradient_entry.set_tooltip_text("Comma-separated #RRGGBB values for custom colors. Example: #ff0000,#00ff00,#0000ff")
     grid.attach(gradient_entry, 3, row, 1, 1)
     row += 1
 
@@ -1119,8 +1119,8 @@ class ConformalPlugin(Gimp.PlugIn):
         )
         procedure.add_double_argument("center-x", "Center _X", "Center X coordinate", -1.0e9, 1.0e9, 0.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("center-y", "Center _Y", "Center Y coordinate", -1.0e9, 1.0e9, 0.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("zoom", "_Zoom", "Zoom factor (higher values zoom in)", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("scale", "_Scale", "Coordinate half-length assigned to the selected image side before zoom", 1.0e-5, 1.0e3, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("zoom", "Output _zoom", "Zoom factor (higher values zoom in)", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("scale", "Input _scale", "Coordinate assigned to opposite sides of image (half of short/long side). Applied before zoom.", 1.0e-5, 1.0e3, 1.0, GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("scale-long-side", "Scale uses _long side", "Apply Scale to the long image side instead of the short side", False, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("grid-spacing", "Grid _length (shorter side)", "Number of grid lines on the shorter axis", 1.0, 1000.0, 4.0, GObject.ParamFlags.READWRITE)
         units_choice = Gimp.Choice.new()
