@@ -563,6 +563,39 @@ def _show_dialog(procedure, config, width, height):
         scale_labels[name] = label
         row += 1
 
+    coord_expander = Gtk.Expander(label="Coordinate settings")
+    coord_expander.set_expanded(False)
+    coord_grid = Gtk.Grid(column_spacing=8, row_spacing=8, margin=8)
+    coord_expander.add(coord_grid)
+    grid.attach(coord_expander, 0, row, 5, 1)
+    row += 1
+    coord_row = 0
+
+    def _make_coord_scale(name, label_text, lower, upper, value, step, page, digits=5, tooltip=None):
+        nonlocal coord_row
+        label = Gtk.Label(label=label_text)
+        label.set_xalign(0.0)
+        if tooltip:
+            label.set_tooltip_text(tooltip)
+        coord_grid.attach(label, 0, coord_row, 1, 1)
+        adj = Gtk.Adjustment(value=float(value), lower=float(lower), upper=float(upper), step_increment=float(step), page_increment=float(page), page_size=0.0)
+        scale = Gtk.Scale.new(Gtk.Orientation.HORIZONTAL, adj)
+        scale.set_digits(digits)
+        scale.set_draw_value(True)
+        scale.set_hexpand(True)
+        if tooltip:
+            scale.set_tooltip_text(tooltip)
+        coord_grid.attach(scale, 1, coord_row, 3, 1)
+        spin = Gtk.SpinButton.new(adj, climb_rate=0.5, digits=digits)
+        spin.set_numeric(True)
+        spin.set_width_chars(8)
+        if tooltip:
+            spin.set_tooltip_text(tooltip)
+        coord_grid.attach(spin, 4, coord_row, 1, 1)
+        scale_widgets[name] = (scale, spin)
+        scale_labels[name] = label
+        coord_row += 1
+
     coord_combo = Gtk.ComboBoxText()
     coord_combo.append("relative", "Relative coordinates")
     coord_combo.append("pixels", "Pixels")
@@ -571,15 +604,21 @@ def _show_dialog(procedure, config, width, height):
         coord_combo.set_active_id("relative")
     coord_label = Gtk.Label(label="Coordinate system")
     coord_label.set_xalign(0.0)
-    coord_label.set_tooltip_text("Relative coordinates: 1 equals the distance to the short edge.")
-    grid.attach(coord_label, 0, row, 1, 1)
+    coord_label.set_tooltip_text("Relative coordinates use the selected image side and scale below.")
+    coord_grid.attach(coord_label, 0, coord_row, 1, 1)
     coord_combo.set_tooltip_text("Select center coordinate units.")
-    grid.attach(coord_combo, 1, row, 1, 1)
-    row += 1
+    coord_grid.attach(coord_combo, 1, coord_row, 1, 1)
 
-    _make_scale("center-x", "Center X", -1.0e3, 1.0e3, config.get_property("center-x"), 0.01, 0.1, digits=5, tooltip="Center of the mapped coordinate system.")
-    _make_scale("center-y", "Center Y", -1.0e3, 1.0e3, config.get_property("center-y"), 0.01, 0.1, digits=5, tooltip="Center of the mapped coordinate system.")
-    _make_scale("zoom", "Zoom", 1.0e-5, 1.0e3, config.get_property("zoom"), 0.01, 0.1, digits=5, tooltip="Zoom factor. Higher values zoom in.")
+    scale_basis_check = Gtk.CheckButton(label="Scale uses long side")
+    scale_basis_check.set_active(bool(config.get_property("scale-long-side")))
+    scale_basis_check.set_tooltip_text("When enabled, Scale applies to the long image side instead of the short side.")
+    coord_grid.attach(scale_basis_check, 2, coord_row, 3, 1)
+    coord_row += 1
+
+    _make_coord_scale("center-x", "Center X", -1.0e3, 1.0e3, config.get_property("center-x"), 0.01, 0.1, digits=5, tooltip="Center of the mapped coordinate system.")
+    _make_coord_scale("center-y", "Center Y", -1.0e3, 1.0e3, config.get_property("center-y"), 0.01, 0.1, digits=5, tooltip="Center of the mapped coordinate system.")
+    _make_coord_scale("zoom", "Zoom", 1.0e-5, 1.0e3, config.get_property("zoom"), 0.01, 0.1, digits=5, tooltip="Zoom factor. Higher values zoom in.")
+    _make_coord_scale("scale", "Scale", 1.0e-5, 1.0e3, config.get_property("scale"), 0.01, 0.1, digits=5, tooltip="Coordinate half-length assigned to the selected image side before zoom.")
 
     def _convert_units(_widget):
         old = getattr(_convert_units, "last", "relative")
@@ -587,15 +626,17 @@ def _show_dialog(procedure, config, width, height):
         if old != new:
             cx = scale_widgets["center-x"][0].get_value()
             cy = scale_widgets["center-y"][0].get_value()
-            short_half_px = min(width, height) / 2.0
+            selected_side_px = max(width, height) if scale_basis_check.get_active() else min(width, height)
+            selected_half_px = selected_side_px / 2.0
+            safe_scale = max(abs(scale_widgets["scale"][0].get_value()), 1e-9)
             img_cx = (width - 1) / 2.0
             img_cy = (height - 1) / 2.0
             if old == "relative" and new == "pixels":
-                scale_widgets["center-x"][0].set_value(img_cx + cx * short_half_px)
-                scale_widgets["center-y"][0].set_value(img_cy - cy * short_half_px)
+                scale_widgets["center-x"][0].set_value(img_cx + (cx / safe_scale) * selected_half_px)
+                scale_widgets["center-y"][0].set_value(img_cy - (cy / safe_scale) * selected_half_px)
             elif old == "pixels" and new == "relative":
-                scale_widgets["center-x"][0].set_value((cx - img_cx) / max(short_half_px, 1e-9))
-                scale_widgets["center-y"][0].set_value((img_cy - cy) / max(short_half_px, 1e-9))
+                scale_widgets["center-x"][0].set_value(((cx - img_cx) / max(selected_half_px, 1e-9)) * safe_scale)
+                scale_widgets["center-y"][0].set_value(((img_cy - cy) / max(selected_half_px, 1e-9)) * safe_scale)
 
         if new == "pixels":
             lower, upper, step, page, digits = -1.0e4, 1.0e4, 0.5, 10.0, 4
@@ -741,6 +782,8 @@ def _show_dialog(procedure, config, width, height):
         scale_widgets["center-x"][0].set_value(0.0)
         scale_widgets["center-y"][0].set_value(0.0)
         scale_widgets["zoom"][0].set_value(1.0)
+        scale_widgets["scale"][0].set_value(1.0)
+        scale_basis_check.set_active(False)
         scale_widgets["grid-spacing"][0].set_value(4.0)
         coord_combo.set_active_id("relative")
         gradient_combo.set_active_id("HSV")
@@ -759,6 +802,8 @@ def _show_dialog(procedure, config, width, height):
         "center-x": config.get_property("center-x"),
         "center-y": config.get_property("center-y"),
         "zoom": config.get_property("zoom"),
+        "scale": config.get_property("scale"),
+        "scale-long-side": scale_basis_check.get_active(),
         "grid-spacing": config.get_property("grid-spacing"),
         "coord-system": coord_combo.get_active_id() or "relative",
         "gradient-preset": gradient_combo.get_active_id() or "HSV",
@@ -777,6 +822,8 @@ def _show_dialog(procedure, config, width, height):
         scale_widgets["center-x"][0].set_value(float(last_used["center-x"]))
         scale_widgets["center-y"][0].set_value(float(last_used["center-y"]))
         scale_widgets["zoom"][0].set_value(float(last_used["zoom"]))
+        scale_widgets["scale"][0].set_value(float(last_used["scale"]))
+        scale_basis_check.set_active(bool(last_used["scale-long-side"]))
         scale_widgets["grid-spacing"][0].set_value(float(last_used["grid-spacing"]))
         coord_combo.set_active_id(last_used["coord-system"])
         gradient_combo.set_active_id(last_used["gradient-preset"])
@@ -812,6 +859,8 @@ def _show_dialog(procedure, config, width, height):
         for name, pair in scale_widgets.items():
             config.set_property(name, float(pair[0].get_value()))
         config.set_property("coord-system", coord_combo.get_active_id() or "relative")
+        config.set_property("scale", float(scale_widgets["scale"][0].get_value()))
+        config.set_property("scale-long-side", bool(scale_basis_check.get_active()))
         config.set_property("gradient-preset", gradient_combo.get_active_id() or "HSV")
         config.set_property("gradient-custom", gradient_entry.get_text().strip())
         config.set_property("abyss-mode", abyss_combo.get_active_id() or "transparent")
@@ -834,6 +883,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     center_x = float(config.get_property("center-x"))
     center_y = float(config.get_property("center-y"))
     zoom = float(config.get_property("zoom"))
+    scale_value = float(config.get_property("scale"))
+    scale_long_side = bool(config.get_property("scale-long-side"))
     coord_system = str(config.get_property("coord-system") or "relative")
     grid = config.get_property("grid-spacing")
     checkerboard = config.get_property("checkerboard")
@@ -859,6 +910,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         center_x = float(config.get_property("center-x"))
         center_y = float(config.get_property("center-y"))
         zoom = float(config.get_property("zoom"))
+        scale_value = float(config.get_property("scale"))
+        scale_long_side = bool(config.get_property("scale-long-side"))
         coord_system = str(config.get_property("coord-system") or "relative")
         grid = config.get_property("grid-spacing")
         checkerboard = config.get_property("checkerboard")
@@ -877,23 +930,26 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         group_analysis = config.get_property("analysis-group")
 
     short_side = float(max(1, min(width, height)))
+    long_side = float(max(1, max(width, height)))
+    selected_side = long_side if scale_long_side else short_side
+    selected_half_px = selected_side / 2.0
+    safe_scale = max(abs(scale_value), 1e-9)
     img_cx = (width - 1) / 2.0
     img_cy = (height - 1) / 2.0
-    short_half_px = short_side / 2.0
 
     if coord_system == "pixels":
-        center_x = (center_x - img_cx) / max(short_half_px, 1e-9)
-        center_y = (img_cy - center_y) / max(short_half_px, 1e-9)
+        center_x = ((center_x - img_cx) / max(selected_half_px, 1e-9)) * safe_scale
+        center_y = ((img_cy - center_y) / max(selected_half_px, 1e-9)) * safe_scale
 
     safe_zoom = max(abs(zoom), 1e-9)
-    domain_short_half_span = 1.0 / safe_zoom
-    domain_x_half_span = domain_short_half_span * (width / short_side)
-    domain_y_half_span = domain_short_half_span * (height / short_side)
+    domain_selected_half_span = safe_scale / safe_zoom
+    domain_x_half_span = domain_selected_half_span * (width / selected_side)
+    domain_y_half_span = domain_selected_half_span * (height / selected_side)
 
     # Build the unzoomed source/image viewport for converting w to source pixels.
-    source_short_half_span = 1.0
-    source_x_half_span = source_short_half_span * (width / short_side)
-    source_y_half_span = source_short_half_span * (height / short_side)
+    source_selected_half_span = safe_scale
+    source_x_half_span = source_selected_half_span * (width / selected_side)
+    source_y_half_span = source_selected_half_span * (height / selected_side)
     source_xl = center_x - source_x_half_span
     source_xr = center_x + source_x_half_span
     source_yt = center_y + source_y_half_span
@@ -1011,6 +1067,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             f"constraint = \"\"\"\n{constraint}\n\"\"\"\n"
             f"domain_xl = {domain_xl}\ndomain_xr = {domain_xr}\ndomain_yt = {domain_yt}\ndomain_yb = {domain_yb}\n"
             f"source_xl = {source_xl}\nsource_xr = {source_xr}\nsource_yt = {source_yt}\nsource_yb = {source_yb}\n"
+            f"scale = {scale_value}\nscale_long_side = {int(scale_long_side)}\n"
             f"grid = {grid}\ncheckerboard = {int(checkerboard)}\n"
             f"gradient = {gradient}\n"
             f"abyss_mode = {abyss_mode}\nabyss_loop_iterations = {abyss_loop_iterations}\n"
@@ -1063,6 +1120,8 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_double_argument("center-x", "Center _X", "Center X coordinate", -1.0e9, 1.0e9, 0.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("center-y", "Center _Y", "Center Y coordinate", -1.0e9, 1.0e9, 0.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("zoom", "_Zoom", "Zoom factor (higher values zoom in)", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("scale", "_Scale", "Coordinate half-length assigned to the selected image side before zoom", 1.0e-5, 1.0e3, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_boolean_argument("scale-long-side", "Scale uses _long side", "Apply Scale to the long image side instead of the short side", False, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("grid-spacing", "Grid _length (shorter side)", "Number of grid lines on the shorter axis", 1.0, 1000.0, 4.0, GObject.ParamFlags.READWRITE)
         units_choice = Gimp.Choice.new()
         units_choice.add("relative", 0, _("Relative coordinates"), "Coordinates relative to the shorter image side")
