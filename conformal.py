@@ -37,7 +37,7 @@ from gi.repository import Gimp
 from gi.repository import GLib
 from gi.repository import GObject
 
-CONF_VERSION = "0.3.9"
+CONF_VERSION = "0.3.10"
 PROC_RENDER = "plug-in-conformal-render"
 _UI_INITIALIZED = False
 GRADIENT_ID_MAP = {0: "HSV", 1: "grayscale", 2: "red-blue", 3: "white-black", 4: "custom"}
@@ -72,11 +72,16 @@ class ConformalRenderer:
         height,
         code,
         constraint,
-        xl,
-        xr,
-        yt,
-        yb,
+        domain_xl,
+        domain_xr,
+        domain_yt,
+        domain_yb,
+        source_xl,
+        source_xr,
+        source_yt,
+        source_yb,
         grid,
+        grid_long_side,
         checkerboard,
         gradient,
         abyss_mode,
@@ -87,13 +92,21 @@ class ConformalRenderer:
         self.height = max(1, int(height))
         self.code = self._normalize_code(code)
         self.constraint = constraint
-        self.xl = float(xl)
-        self.xr = float(xr)
-        self.yt = float(yt)
-        self.yb = float(yb)
+        # Store the zoomed output/domain viewport used to compute z.
+        self.domain_xl = float(domain_xl)
+        self.domain_xr = float(domain_xr)
+        self.domain_yt = float(domain_yt)
+        self.domain_yb = float(domain_yb)
+        # Store the unzoomed source/image viewport used to sample evaluated w.
+        self.source_xl = float(source_xl)
+        self.source_xr = float(source_xr)
+        self.source_yt = float(source_yt)
+        self.source_yb = float(source_yb)
         self.grid_lines = max(float(grid), 1.0)
-        shorter_span = max(min(abs(self.xr - self.xl), abs(self.yt - self.yb)), 1e-9)
-        self.grid = max(shorter_span / self.grid_lines, 1e-9)
+        grid_x_span = abs(self.source_xr - self.source_xl)
+        grid_y_span = abs(self.source_yt - self.source_yb)
+        grid_side_span = max(grid_x_span, grid_y_span) if grid_long_side else min(grid_x_span, grid_y_span)
+        self.grid = max((grid_side_span / 2.0) / self.grid_lines, 1e-9)
         self.checkerboard = bool(checkerboard)
         self.gradient = gradient or "HSV"
         self.abyss_mode = (abyss_mode or "transparent").strip().lower()
@@ -101,8 +114,12 @@ class ConformalRenderer:
         self.log_base = str(log_base or "2")
         self._validate_gradient_setting()
 
-        self._sx = (self.width - 1.0) / (self.xr - self.xl)
-        self._sy = (self.height - 1.0) / (self.yt - self.yb)
+        # Build separate output/domain scales for pixel-to-z conversion.
+        self._domain_sx = (self.width - 1.0) / (self.domain_xr - self.domain_xl)
+        self._domain_sy = (self.height - 1.0) / (self.domain_yt - self.domain_yb)
+        # Build separate source/image scales for w-to-source-pixel conversion.
+        self._source_sx = (self.width - 1.0) / (self.source_xr - self.source_xl)
+        self._source_sy = (self.height - 1.0) / (self.source_yt - self.source_yb)
         self._two_pi = 2.0 * math.pi
         if self.log_base == "e":
             self._log = 1.0
@@ -142,12 +159,9 @@ class ConformalRenderer:
         snippet = (code or "").strip()
         if not snippet:
             return "w = z"
-        # Map common math notation to Python.
+        # Map common exponent notation to Python.
         snippet = snippet.replace("^", "**")
-        # Allow shorthand multiplication like 2z -> 2*z.
-        snippet = re.sub(r"(\d+(?:\.\d+)?)(\s*)(z)\b", r"\1*\3", snippet)
-        # Interpret "i" as the imaginary unit, including forms like 0.2i.
-        snippet = re.sub(r"(?<=\d)i\b", "j", snippet)
+        # Interpret standalone "i" as the imaginary unit; coefficients must use explicit multiplication, e.g. 0.2*i.
         snippet = re.sub(r"\bi\b", "(1j)", snippet)
         ConformalRenderer._validate_code_ast(snippet)
         parsed = ast.parse(snippet, mode="exec")
@@ -294,8 +308,8 @@ class ConformalRenderer:
 
         if valid:
             try:
-                # 2 divisor is needed to normalize log to short side
-                logw = cmath.log(w / 2)
+                # Use source coordinates where the center-to-short-edge distance is 1 unit.
+                logw = cmath.log(w)
                 arg = logw.imag
                 if arg < 0.0:
                     arg += self._two_pi
@@ -363,9 +377,11 @@ class ConformalRenderer:
 
         for row in range(self.height):
             base = row * self.width * 4
-            imag = self.yt - (row / self._sy)
+            # Convert the output row through the zoomed domain viewport.
+            imag = self.domain_yt - (row / self._domain_sy)
             for col in range(self.width):
-                z = col / self._sx + self.xl + 1j * imag
+                # Convert the output column through the zoomed domain viewport.
+                z = col / self._domain_sx + self.domain_xl + 1j * imag
                 valid, w, arg_norm, mod, sqr, grid_line = self._evaluate_point(z)
 
                 if not valid:
@@ -378,8 +394,9 @@ class ConformalRenderer:
                     mod_px = self._mod_shade(mod)
                     grid_px = self._grid_pixel(sqr if self.checkerboard else grid_line)
                     if source_pixels is not None:
-                        sx = int(round((w.real - self.xl) * self._sx))
-                        sy = int(round((self.yt - w.imag) * self._sy))
+                        # Convert evaluated w through the unzoomed source/image viewport.
+                        sx = int(round((w.real - self.source_xl) * self._source_sx))
+                        sy = int(round((self.source_yt - w.imag) * self._source_sy))
                         if 0 <= sx < self.width and 0 <= sy < self.height:
                             sidx = (sy * self.width + sx) * 4
                             mapped_px = tuple(source_pixels[sidx:sidx + 4])
@@ -493,13 +510,32 @@ def _show_dialog(procedure, config, width, height):
     grid.attach(code_label, 0, row, 1, 1)
     code_view = Gtk.TextView()
     code_view.set_monospace(True)
-    code_view.set_tooltip_text("Supports shorthand like 2z, i, and ^.")
+    code_view.set_tooltip_text("Use explicit multiplication, for example 2*z. Use Python syntax for iterative functions.")
     code_buffer = code_view.get_buffer()
     code_buffer.set_text(config.get_property("code"))
     sw = Gtk.ScrolledWindow()
     sw.set_min_content_height(120)
     sw.add(code_view)
     grid.attach(sw, 1, row, 3, 1)
+
+    syntax_help = Gtk.Expander(label="Syntax help")
+    syntax_help.set_expanded(False)
+    syntax_label = Gtk.Label(
+        label=(
+            "Multiplication must be explicit: type 2*z, not 2z.\n"
+            "Use Python operators such as z**2 or z^2 for powers.\n"
+            "Use 0.2*i for imaginary coefficients, not 0.2i.\n"
+            "Iterative functions can use helper code, for example:\n"
+            "w = z\n"
+            "for _ in range(8):\n"
+            "    w = w*w + z"
+        )
+    )
+    syntax_label.set_xalign(0.0)
+    syntax_label.set_yalign(0.0)
+    syntax_label.set_line_wrap(True)
+    syntax_help.add(syntax_label)
+    grid.attach(syntax_help, 4, row, 1, 1)
     row += 1
 
     scale_widgets = {}
@@ -530,6 +566,39 @@ def _show_dialog(procedure, config, width, height):
         scale_labels[name] = label
         row += 1
 
+    coord_expander = Gtk.Expander(label="Coordinate/Scale settings")
+    coord_expander.set_expanded(False)
+    coord_grid = Gtk.Grid(column_spacing=8, row_spacing=8, margin=8)
+    coord_expander.add(coord_grid)
+    grid.attach(coord_expander, 0, row, 5, 1)
+    row += 1
+    coord_row = 0
+
+    def _make_coord_scale(name, label_text, lower, upper, value, step, page, digits=5, tooltip=None):
+        nonlocal coord_row
+        label = Gtk.Label(label=label_text)
+        label.set_xalign(0.0)
+        if tooltip:
+            label.set_tooltip_text(tooltip)
+        coord_grid.attach(label, 0, coord_row, 1, 1)
+        adj = Gtk.Adjustment(value=float(value), lower=float(lower), upper=float(upper), step_increment=float(step), page_increment=float(page), page_size=0.0)
+        scale = Gtk.Scale.new(Gtk.Orientation.HORIZONTAL, adj)
+        scale.set_digits(digits)
+        scale.set_draw_value(True)
+        scale.set_hexpand(True)
+        if tooltip:
+            scale.set_tooltip_text(tooltip)
+        coord_grid.attach(scale, 1, coord_row, 3, 1)
+        spin = Gtk.SpinButton.new(adj, climb_rate=0.5, digits=digits)
+        spin.set_numeric(True)
+        spin.set_width_chars(8)
+        if tooltip:
+            spin.set_tooltip_text(tooltip)
+        coord_grid.attach(spin, 4, coord_row, 1, 1)
+        scale_widgets[name] = (scale, spin)
+        scale_labels[name] = label
+        coord_row += 1
+
     coord_combo = Gtk.ComboBoxText()
     coord_combo.append("relative", "Relative coordinates")
     coord_combo.append("pixels", "Pixels")
@@ -538,15 +607,21 @@ def _show_dialog(procedure, config, width, height):
         coord_combo.set_active_id("relative")
     coord_label = Gtk.Label(label="Coordinate system")
     coord_label.set_xalign(0.0)
-    coord_label.set_tooltip_text("Relative coordinates: 1 equals the distance to the short edge.")
-    grid.attach(coord_label, 0, row, 1, 1)
+    coord_label.set_tooltip_text("Relative coordinates use the selected image side and scale below.")
+    coord_grid.attach(coord_label, 0, coord_row, 1, 1)
     coord_combo.set_tooltip_text("Select center coordinate units.")
-    grid.attach(coord_combo, 1, row, 1, 1)
-    row += 1
+    coord_grid.attach(coord_combo, 1, coord_row, 1, 1)
 
-    _make_scale("center-x", "Center X", -1.0e3, 1.0e3, config.get_property("center-x"), 0.01, 0.1, digits=5, tooltip="Center of the mapped coordinate system.")
-    _make_scale("center-y", "Center Y", -1.0e3, 1.0e3, config.get_property("center-y"), 0.01, 0.1, digits=5, tooltip="Center of the mapped coordinate system.")
-    _make_scale("zoom", "Zoom", 1.0e-5, 1.0e3, config.get_property("zoom"), 0.01, 0.1, digits=5, tooltip="Zoom factor. Higher values zoom in.")
+    scale_basis_check = Gtk.CheckButton(label="Scale uses long side")
+    scale_basis_check.set_active(bool(config.get_property("scale-long-side")))
+    scale_basis_check.set_tooltip_text("When enabled, Scale applies to the long image side instead of the short side.")
+    coord_grid.attach(scale_basis_check, 2, coord_row, 3, 1)
+    coord_row += 1
+
+    _make_coord_scale("scale", "Input scale", 1.0e-5, 1.0e3, config.get_property("scale"), 0.01, 0.1, digits=5, tooltip="Coordinate assigned to opposite sides of image (half of short/long side). Applied before zoom.")
+    _make_coord_scale("center-x", "Center X", -1.0e3, 1.0e3, config.get_property("center-x"), 0.01, 0.1, digits=5, tooltip="Center width of the mapped coordinate system.")
+    _make_coord_scale("center-y", "Center Y", -1.0e3, 1.0e3, config.get_property("center-y"), 0.01, 0.1, digits=5, tooltip="Center height of the mapped coordinate system.")
+    _make_coord_scale("zoom", "Output zoom", 1.0e-5, 1.0e3, config.get_property("zoom"), 0.01, 0.1, digits=5, tooltip="Zoom factor. Higher values zoom in.")
 
     def _convert_units(_widget):
         old = getattr(_convert_units, "last", "relative")
@@ -554,15 +629,17 @@ def _show_dialog(procedure, config, width, height):
         if old != new:
             cx = scale_widgets["center-x"][0].get_value()
             cy = scale_widgets["center-y"][0].get_value()
-            short_half = min(width, height) / 2.0
+            selected_side_px = max(width, height) if scale_basis_check.get_active() else min(width, height)
+            selected_half_px = selected_side_px / 2.0
+            safe_scale = max(abs(scale_widgets["scale"][0].get_value()), 1e-9)
             img_cx = (width - 1) / 2.0
             img_cy = (height - 1) / 2.0
             if old == "relative" and new == "pixels":
-                scale_widgets["center-x"][0].set_value(img_cx + cx * short_half)
-                scale_widgets["center-y"][0].set_value(img_cy - cy * short_half)
+                scale_widgets["center-x"][0].set_value(img_cx + (cx / safe_scale) * selected_half_px)
+                scale_widgets["center-y"][0].set_value(img_cy - (cy / safe_scale) * selected_half_px)
             elif old == "pixels" and new == "relative":
-                scale_widgets["center-x"][0].set_value((cx - img_cx) / max(short_half, 1e-9))
-                scale_widgets["center-y"][0].set_value((img_cy - cy) / max(short_half, 1e-9))
+                scale_widgets["center-x"][0].set_value(((cx - img_cx) / max(selected_half_px, 1e-9)) * safe_scale)
+                scale_widgets["center-y"][0].set_value(((img_cy - cy) / max(selected_half_px, 1e-9)) * safe_scale)
 
         if new == "pixels":
             lower, upper, step, page, digits = -1.0e4, 1.0e4, 0.5, 10.0, 4
@@ -583,8 +660,47 @@ def _show_dialog(procedure, config, width, height):
     coord_combo.connect("changed", _convert_units)
     _convert_units(None)
 
+    abyss_combo = Gtk.ComboBoxText()
+    for key, label in [("transparent", "Transparent"), ("loop", "Loop"), ("reflect", "Reflect"), ("clamp", "Clamp"), ("black", "Black"), ("white", "White")]:
+        abyss_combo.append(key, label)
+    abyss_value = config.get_property("abyss-mode")
+    abyss_value = ABYSS_ID_MAP.get(abyss_value, "transparent") if isinstance(abyss_value, int) else str(abyss_value)
+    abyss_combo.set_active_id(abyss_value)
+    abyss_label = Gtk.Label(label="Abyss mode", xalign=0.0)
+    abyss_spin = Gtk.SpinButton()
+    abyss_spin.set_adjustment(Gtk.Adjustment(value=float(config.get_property("abyss-loop-iterations")), lower=1.0, upper=1024.0, step_increment=1.0, page_increment=10.0, page_size=0.0))
+
+    transform_check = Gtk.CheckButton(label="Transform active layer")
+    transform_check.set_active(bool(config.get_property("transform-active-layer")))
+    grid.attach(transform_check, 0, row, 1, 1)
+    row += 1
+
+    abyss_label.set_tooltip_text("How samples outside the image bounds are handled.")
+    grid.attach(abyss_label, 0, row, 1, 1)
+    abyss_combo.set_tooltip_text("Choose outside-image sampling behavior.")
+    grid.attach(abyss_combo, 1, row, 1, 1)
+
+    wrap_label = Gtk.Label(label="Wrap iterations", xalign=0.0)
+    wrap_label.set_tooltip_text("Maximum number of adjacent out-of-bounds wrap tiles to sample.")
+    grid.attach(wrap_label, 2, row, 1, 1)
+    abyss_spin.set_tooltip_text("Effective for Loop and Reflect modes.")
+    grid.attach(abyss_spin, 3, row, 1, 1)
+    row += 1
+
+    analysis_check = Gtk.CheckButton(label="Add analysis layers")
+    analysis_check.set_active(bool(config.get_property("create-analysis-layers")))
+    group_check = Gtk.CheckButton(label="Group analysis layers (has visual bug)")
+    group_check.set_active(bool(config.get_property("analysis-group")))
+    checker_check = Gtk.CheckButton(label="Checkerboard (grid if disabled)")
+    checker_check.set_active(bool(config.get_property("checkerboard")))
+    grid.attach(analysis_check, 0, row, 1, 1)
+    row += 1
+    grid.attach(checker_check, 0, row, 2, 1)
+    grid.attach(group_check, 2, row, 2, 1)
+    row += 1
+
     gradient_combo = Gtk.ComboBoxText()
-    for key, label in [("HSV", "HSV"), ("grayscale", "Grayscale"), ("red-blue", "Red-Blue"), ("white-black", "White-Black"), ("custom", "Custom")]:
+    for key, label in [("HSV", "HSV"), ("red-blue", "Red-Blue"), ("grayscale", "Grayscale"), ("white-black", "White-Black"), ("custom", "Custom")]:
         gradient_combo.append(key, label)
     gradient_value = config.get_property("gradient-preset")
     gradient_value = GRADIENT_ID_MAP.get(gradient_value, "HSV") if isinstance(gradient_value, int) else str(gradient_value)
@@ -596,77 +712,27 @@ def _show_dialog(procedure, config, width, height):
     grid.attach(gradient_combo, 1, row, 1, 1)
 
     gradient_entry = Gtk.Entry()
-    gradient_entry.set_text(config.get_property("gradient-custom"))
+    gradient_entry.set_text(config.get_property("gradient-custom") or "")
     custom_palette_label = Gtk.Label(label="Custom palette", xalign=0.0)
-    custom_palette_label.set_tooltip_text("Comma-separated #RRGGBB stops for Custom palette.")
-    grid.attach(custom_palette_label, 2, row, 1, 1)
-    gradient_entry.set_tooltip_text("Example: #ff0000,#00ff00,#0000ff")
-    grid.attach(gradient_entry, 3, row, 1, 1)
-    row += 1
+    custom_palette_label.set_tooltip_text("Comma-separated #RRGGBB values for custom colors. Used when Custom palette is selected.")
 
     def _pick_color(_button):
         chooser = Gtk.ColorChooserDialog(title="Pick color", transient_for=dialog, modal=True)
         chooser.set_use_alpha(False)
         if chooser.run() == Gtk.ResponseType.OK:
             rgba = chooser.get_rgba()
-            hex_value = "#{:02x}{:02x}{:02x}".format(int(rgba.red * 255), int(rgba.green * 255), int(rgba.blue * 255))
+            hex_value = "#{:02x}{:02x}{:02x}".format(round(rgba.red * 255), round(rgba.green * 255), round(rgba.blue * 255))
             current = gradient_entry.get_text().strip()
             gradient_entry.set_text(f"{current},{hex_value}" if current else hex_value)
         chooser.destroy()
 
+    grid.attach(custom_palette_label, 2, row, 1, 1)
+    gradient_entry.set_tooltip_text("Comma-separated #RRGGBB values for custom colors. Example: #ff0000,#00ff00,#0000ff")
+    grid.attach(gradient_entry, 3, row, 1, 1)
     pick_btn = Gtk.Button(label="Pick color…")
     pick_btn.connect("clicked", _pick_color)
-    grid.attach(Gtk.Label(), 2, row, 1, 1)
-    grid.attach(pick_btn, 3, row, 1, 1)
+    grid.attach(pick_btn, 4, row, 1, 1)
     row += 1
-
-    abyss_combo = Gtk.ComboBoxText()
-    for key, label in [("transparent", "Transparent"), ("loop", "Loop"), ("reflect", "Reflect"), ("clamp", "Clamp"), ("black", "Black"), ("white", "White")]:
-        abyss_combo.append(key, label)
-    abyss_value = config.get_property("abyss-mode")
-    abyss_value = ABYSS_ID_MAP.get(abyss_value, "transparent") if isinstance(abyss_value, int) else str(abyss_value)
-    abyss_combo.set_active_id(abyss_value)
-    abyss_label = Gtk.Label(label="Abyss mode", xalign=0.0)
-    abyss_label.set_tooltip_text("How samples outside the image bounds are handled.")
-    grid.attach(abyss_label, 0, row, 1, 1)
-    abyss_combo.set_tooltip_text("Choose outside-image sampling behavior.")
-    grid.attach(abyss_combo, 1, row, 1, 1)
-
-    abyss_spin = Gtk.SpinButton()
-    abyss_spin.set_adjustment(Gtk.Adjustment(value=float(config.get_property("abyss-loop-iterations")), lower=1.0, upper=1024.0, step_increment=1.0, page_increment=10.0, page_size=0.0))
-    wrap_label = Gtk.Label(label="Wrap iterations", xalign=0.0)
-    wrap_label.set_tooltip_text("Maximum number of out-of-bounds wrap tiles to sample.")
-    grid.attach(wrap_label, 2, row, 1, 1)
-    abyss_spin.set_tooltip_text("Effective for Loop and Reflect modes.")
-    grid.attach(abyss_spin, 3, row, 1, 1)
-    row += 1
-
-    transform_check = Gtk.CheckButton(label="Transform active layer")
-    transform_check.set_active(bool(config.get_property("transform-active-layer")))
-    analysis_check = Gtk.CheckButton(label="Add analysis layers")
-    analysis_check.set_active(bool(config.get_property("create-analysis-layers")))
-    group_check = Gtk.CheckButton(label="Group analysis layers (has visual bug)")
-    group_check.set_active(bool(config.get_property("analysis-group")))
-    checker_check = Gtk.CheckButton(label="Checkerboard")
-    checker_check.set_active(bool(config.get_property("checkerboard")))
-    grid.attach(transform_check, 0, row, 2, 1)
-    grid.attach(analysis_check, 2, row, 2, 1)
-    row += 1
-    grid.attach(group_check, 0, row, 2, 1)
-    grid.attach(checker_check, 2, row, 2, 1)
-    row += 1
-
-    _make_scale(
-        "grid-spacing",
-        "Grid length (shorter side)",
-        1.0,
-        1000.0,
-        config.get_property("grid-spacing"),
-        1.0,
-        10.0,
-        digits=2,
-        tooltip="Number of grid lines along the shorter image side.",
-    )
 
     log_combo = Gtk.ComboBoxText()
     log_combo.append("2", "2")
@@ -682,20 +748,46 @@ def _show_dialog(procedure, config, width, height):
     grid.attach(log_combo, 1, row, 1, 1)
     row += 1
 
+    grid_basis_check = Gtk.CheckButton(label="Grid density uses long side")
+    grid_basis_check.set_active(bool(config.get_property("grid-long-side")))
+    grid_basis_check.set_tooltip_text("When enabled, grid density is measured from the center to the long image side instead of the short side.")
+    grid.attach(grid_basis_check, 0, row, 3, 1)
+    row += 1
+
+    _make_scale(
+        "grid-density",
+        "Grid density (from center to side)",
+        1.0,
+        100.0,
+        config.get_property("grid-density"),
+        1.0,
+        10.0,
+        digits=2,
+        tooltip="Number of grid lines from the center to the selected image side.",
+    )
+    row += 1
+
     def _sync():
-        gradient_entry.set_sensitive(gradient_combo.get_active_id() == "custom")
-        pick_btn.set_sensitive(gradient_combo.get_active_id() == "custom")
+        analysis_enabled = analysis_check.get_active()
+        custom_palette = gradient_combo.get_active_id() == "custom"
         abyss_label.set_sensitive(transform_check.get_active())
         abyss_combo.set_sensitive(transform_check.get_active())
-        abyss_spin.set_sensitive(transform_check.get_active() and abyss_combo.get_active_id() in ("loop", "reflect"))
-        checker_check.set_sensitive(analysis_check.get_active())
-        grid_enabled = analysis_check.get_active()
-        scale_labels["grid-spacing"].set_sensitive(grid_enabled)
-        scale_widgets["grid-spacing"][0].set_sensitive(grid_enabled)
-        scale_widgets["grid-spacing"][1].set_sensitive(grid_enabled)
-        log_label.set_sensitive(analysis_check.get_active())
-        log_combo.set_sensitive(analysis_check.get_active())
-        group_check.set_sensitive(analysis_check.get_active())
+        wrap_label.set_sensitive(transform_check.get_active())
+        abyss_spin.set_sensitive(transform_check.get_active())
+        group_check.set_sensitive(analysis_enabled)
+        checker_check.set_sensitive(analysis_enabled)
+        palette_label.set_sensitive(analysis_enabled)
+        gradient_combo.set_sensitive(analysis_enabled)
+        custom_palette_label.set_sensitive(analysis_enabled and custom_palette)
+        gradient_entry.set_sensitive(analysis_enabled and custom_palette)
+        pick_btn.set_sensitive(analysis_enabled and custom_palette)
+        grid_enabled = analysis_enabled
+        grid_basis_check.set_sensitive(grid_enabled)
+        scale_labels["grid-density"].set_sensitive(grid_enabled)
+        scale_widgets["grid-density"][0].set_sensitive(grid_enabled)
+        scale_widgets["grid-density"][1].set_sensitive(grid_enabled)
+        log_label.set_sensitive(analysis_enabled)
+        log_combo.set_sensitive(analysis_enabled)
 
     gradient_combo.connect("changed", lambda *_a: _sync())
     transform_check.connect("toggled", lambda *_a: _sync())
@@ -708,7 +800,10 @@ def _show_dialog(procedure, config, width, height):
         scale_widgets["center-x"][0].set_value(0.0)
         scale_widgets["center-y"][0].set_value(0.0)
         scale_widgets["zoom"][0].set_value(1.0)
-        scale_widgets["grid-spacing"][0].set_value(4.0)
+        scale_widgets["scale"][0].set_value(1.0)
+        scale_basis_check.set_active(False)
+        grid_basis_check.set_active(False)
+        scale_widgets["grid-density"][0].set_value(8.0)
         coord_combo.set_active_id("relative")
         gradient_combo.set_active_id("HSV")
         gradient_entry.set_text("#ff0000,#ffff00,#00ff00,#00ffff,#0000ff")
@@ -726,7 +821,10 @@ def _show_dialog(procedure, config, width, height):
         "center-x": config.get_property("center-x"),
         "center-y": config.get_property("center-y"),
         "zoom": config.get_property("zoom"),
-        "grid-spacing": config.get_property("grid-spacing"),
+        "scale": config.get_property("scale"),
+        "scale-long-side": scale_basis_check.get_active(),
+        "grid-density": config.get_property("grid-density"),
+        "grid-long-side": grid_basis_check.get_active(),
         "coord-system": coord_combo.get_active_id() or "relative",
         "gradient-preset": gradient_combo.get_active_id() or "HSV",
         "gradient-custom": gradient_entry.get_text(),
@@ -744,7 +842,10 @@ def _show_dialog(procedure, config, width, height):
         scale_widgets["center-x"][0].set_value(float(last_used["center-x"]))
         scale_widgets["center-y"][0].set_value(float(last_used["center-y"]))
         scale_widgets["zoom"][0].set_value(float(last_used["zoom"]))
-        scale_widgets["grid-spacing"][0].set_value(float(last_used["grid-spacing"]))
+        scale_widgets["scale"][0].set_value(float(last_used["scale"]))
+        scale_basis_check.set_active(bool(last_used["scale-long-side"]))
+        scale_widgets["grid-density"][0].set_value(float(last_used["grid-density"]))
+        grid_basis_check.set_active(bool(last_used["grid-long-side"]))
         coord_combo.set_active_id(last_used["coord-system"])
         gradient_combo.set_active_id(last_used["gradient-preset"])
         gradient_entry.set_text(last_used["gradient-custom"])
@@ -779,6 +880,9 @@ def _show_dialog(procedure, config, width, height):
         for name, pair in scale_widgets.items():
             config.set_property(name, float(pair[0].get_value()))
         config.set_property("coord-system", coord_combo.get_active_id() or "relative")
+        config.set_property("scale", float(scale_widgets["scale"][0].get_value()))
+        config.set_property("scale-long-side", bool(scale_basis_check.get_active()))
+        config.set_property("grid-long-side", bool(grid_basis_check.get_active()))
         config.set_property("gradient-preset", gradient_combo.get_active_id() or "HSV")
         config.set_property("gradient-custom", gradient_entry.get_text().strip())
         config.set_property("abyss-mode", abyss_combo.get_active_id() or "transparent")
@@ -801,8 +905,11 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     center_x = float(config.get_property("center-x"))
     center_y = float(config.get_property("center-y"))
     zoom = float(config.get_property("zoom"))
+    scale_value = float(config.get_property("scale"))
+    scale_long_side = bool(config.get_property("scale-long-side"))
     coord_system = str(config.get_property("coord-system") or "relative")
-    grid = config.get_property("grid-spacing")
+    grid = config.get_property("grid-density")
+    grid_long_side = bool(config.get_property("grid-long-side"))
     checkerboard = config.get_property("checkerboard")
     gradient_preset = config.get_property("gradient-preset")
     gradient_custom = config.get_property("gradient-custom")
@@ -826,8 +933,11 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         center_x = float(config.get_property("center-x"))
         center_y = float(config.get_property("center-y"))
         zoom = float(config.get_property("zoom"))
+        scale_value = float(config.get_property("scale"))
+        scale_long_side = bool(config.get_property("scale-long-side"))
         coord_system = str(config.get_property("coord-system") or "relative")
-        grid = config.get_property("grid-spacing")
+        grid = config.get_property("grid-density")
+        grid_long_side = bool(config.get_property("grid-long-side"))
         checkerboard = config.get_property("checkerboard")
         gradient_preset = config.get_property("gradient-preset")
         gradient_custom = config.get_property("gradient-custom")
@@ -844,23 +954,36 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         group_analysis = config.get_property("analysis-group")
 
     short_side = float(max(1, min(width, height)))
+    long_side = float(max(1, max(width, height)))
+    selected_side = long_side if scale_long_side else short_side
+    selected_half_px = selected_side / 2.0
+    safe_scale = max(abs(scale_value), 1e-9)
     img_cx = (width - 1) / 2.0
     img_cy = (height - 1) / 2.0
-    short_half_px = short_side / 2.0
 
     if coord_system == "pixels":
-        center_x = (center_x - img_cx) / max(short_half_px, 1e-9)
-        center_y = (img_cy - center_y) / max(short_half_px, 1e-9)
+        center_x = ((center_x - img_cx) / max(selected_half_px, 1e-9)) * safe_scale
+        center_y = ((img_cy - center_y) / max(selected_half_px, 1e-9)) * safe_scale
 
     safe_zoom = max(abs(zoom), 1e-9)
-    short_half_span = 2.0 / safe_zoom
-    x_half_span = short_half_span * (width / short_side)
-    y_half_span = short_half_span * (height / short_side)
+    domain_selected_half_span = safe_scale / safe_zoom
+    domain_x_half_span = domain_selected_half_span * (width / selected_side)
+    domain_y_half_span = domain_selected_half_span * (height / selected_side)
 
-    xl = center_x - x_half_span
-    xr = center_x + x_half_span
-    yt = center_y + y_half_span
-    yb = center_y - y_half_span
+    # Build the unzoomed source/image viewport for converting w to source pixels.
+    source_selected_half_span = safe_scale
+    source_x_half_span = source_selected_half_span * (width / selected_side)
+    source_y_half_span = source_selected_half_span * (height / selected_side)
+    source_xl = center_x - source_x_half_span
+    source_xr = center_x + source_x_half_span
+    source_yt = center_y + source_y_half_span
+    source_yb = center_y - source_y_half_span
+
+    # Build the zoomed output/domain viewport for converting output pixels to z.
+    domain_xl = center_x - domain_x_half_span
+    domain_xr = center_x + domain_x_half_span
+    domain_yt = center_y + domain_y_half_span
+    domain_yb = center_y - domain_y_half_span
 
     try:
         renderer_full = ConformalRenderer(
@@ -868,11 +991,16 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             height,
             code,
             constraint,
-            xl,
-            xr,
-            yt,
-            yb,
+            domain_xl,
+            domain_xr,
+            domain_yt,
+            domain_yb,
+            source_xl,
+            source_xr,
+            source_yt,
+            source_yb,
             grid,
+            grid_long_side,
             checkerboard,
             gradient,
             abyss_mode,
@@ -962,8 +1090,10 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             f"# conformal {CONF_VERSION}\n"
             f"code = \"\"\"\n{code}\n\"\"\"\n"
             f"constraint = \"\"\"\n{constraint}\n\"\"\"\n"
-            f"xl = {xl}\nxr = {xr}\nyt = {yt}\nyb = {yb}\n"
-            f"grid = {grid}\ncheckerboard = {int(checkerboard)}\n"
+            f"domain_xl = {domain_xl}\ndomain_xr = {domain_xr}\ndomain_yt = {domain_yt}\ndomain_yb = {domain_yb}\n"
+            f"source_xl = {source_xl}\nsource_xr = {source_xr}\nsource_yt = {source_yt}\nsource_yb = {source_yb}\n"
+            f"scale = {scale_value}\nscale_long_side = {int(scale_long_side)}\n"
+            f"grid = {grid}\ngrid_long_side = {int(grid_long_side)}\ncheckerboard = {int(checkerboard)}\n"
             f"gradient = {gradient}\n"
             f"abyss_mode = {abyss_mode}\nabyss_loop_iterations = {abyss_loop_iterations}\n"
             f"width = {width}\nheight = {height}\n"
@@ -1008,19 +1138,22 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_string_argument(
             "code",
             "_Formula",
-            "Python code assigning w; supports helper functions/recursion, '^' exponentiation, and 'i' as imaginary unit",
+            "Python code assigning w; multiplication must be explicit, for example 2*z",
             "w = z",
             GObject.ParamFlags.READWRITE,
         )
         procedure.add_double_argument("center-x", "Center _X", "Center X coordinate", -1.0e9, 1.0e9, 0.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("center-y", "Center _Y", "Center Y coordinate", -1.0e9, 1.0e9, 0.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("zoom", "_Zoom", "Zoom factor (higher values zoom in)", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("grid-spacing", "Grid _length (shorter side)", "Number of grid lines on the shorter axis", 1.0, 1000.0, 4.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("zoom", "Output _zoom", "Zoom factor (higher values zoom in)", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("scale", "Input _scale", "Coordinate assigned to opposite sides of image (half of short/long side). Applied before zoom.", 1.0e-5, 1.0e3, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_boolean_argument("scale-long-side", "Scale uses _long side", "Apply Scale to the long image side instead of the short side", False, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("grid-density", "Grid _density (from center to side)", "Number of grid lines from the center to the selected image side", 1.0, 1000.0, 8.0, GObject.ParamFlags.READWRITE)
+        procedure.add_boolean_argument("grid-long-side", "Grid density uses l_ong side", "Measure Grid density from the center to the long image side instead of the short side", False, GObject.ParamFlags.READWRITE)
         units_choice = Gimp.Choice.new()
         units_choice.add("relative", 0, _("Relative coordinates"), "Coordinates relative to the shorter image side")
         units_choice.add("pixels", 1, _("Pixels"), "Absolute pixel units")
         procedure.add_choice_argument("coord-system", "_Coordinate system", "Coordinate unit system for center values", units_choice, "relative", GObject.ParamFlags.READWRITE)
-        procedure.add_boolean_argument("checkerboard", "_Checkerboard", "Use checkerboard instead of line grid", False, GObject.ParamFlags.READWRITE)
+        procedure.add_boolean_argument("checkerboard", "_Checkerboard (grid if disabled)", "Use checkerboard instead of line grid", False, GObject.ParamFlags.READWRITE)
         choices_gradient = Gimp.Choice.new()
         choices_gradient.add("HSV", 0, _("HSV"), "HSV wheel")
         choices_gradient.add("grayscale", 1, _("Grayscale"), "Black to white")
@@ -1038,7 +1171,7 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_string_argument(
             "gradient-custom",
             "Custom p_alette",
-            "Custom gradient stops (#RRGGBB,#RRGGBB,...) used when preset is 'custom'",
+            "Comma-separated #RRGGBB values for custom colors. Used when preset is 'custom'",
             "#ff0000,#ffff00,#00ff00,#00ffff,#0000ff",
             GObject.ParamFlags.READWRITE,
         )
