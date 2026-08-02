@@ -667,37 +667,40 @@ def _show_dialog(procedure, config, width, height):
     abyss_value = ABYSS_ID_MAP.get(abyss_value, "transparent") if isinstance(abyss_value, int) else str(abyss_value)
     abyss_combo.set_active_id(abyss_value)
     abyss_label = Gtk.Label(label="Abyss mode", xalign=0.0)
+    abyss_spin = Gtk.SpinButton()
+    abyss_spin.set_adjustment(Gtk.Adjustment(value=float(config.get_property("abyss-loop-iterations")), lower=1.0, upper=1024.0, step_increment=1.0, page_increment=10.0, page_size=0.0))
+
+    transform_check = Gtk.CheckButton(label="Transform active layer")
+    transform_check.set_active(bool(config.get_property("transform-active-layer")))
+    grid.attach(transform_check, 0, row, 1, 1)
+    row += 1
+
     abyss_label.set_tooltip_text("How samples outside the image bounds are handled.")
     grid.attach(abyss_label, 0, row, 1, 1)
     abyss_combo.set_tooltip_text("Choose outside-image sampling behavior.")
     grid.attach(abyss_combo, 1, row, 1, 1)
 
-    abyss_spin = Gtk.SpinButton()
-    abyss_spin.set_adjustment(Gtk.Adjustment(value=float(config.get_property("abyss-loop-iterations")), lower=1.0, upper=1024.0, step_increment=1.0, page_increment=10.0, page_size=0.0))
     wrap_label = Gtk.Label(label="Wrap iterations", xalign=0.0)
-    wrap_label.set_tooltip_text("Maximum number of out-of-bounds wrap tiles to sample.")
+    wrap_label.set_tooltip_text("Maximum number of adjacent out-of-bounds wrap tiles to sample.")
     grid.attach(wrap_label, 2, row, 1, 1)
     abyss_spin.set_tooltip_text("Effective for Loop and Reflect modes.")
     grid.attach(abyss_spin, 3, row, 1, 1)
     row += 1
 
-    transform_check = Gtk.CheckButton(label="Transform active layer")
-    transform_check.set_active(bool(config.get_property("transform-active-layer")))
     analysis_check = Gtk.CheckButton(label="Add analysis layers")
     analysis_check.set_active(bool(config.get_property("create-analysis-layers")))
     group_check = Gtk.CheckButton(label="Group analysis layers (has visual bug)")
     group_check.set_active(bool(config.get_property("analysis-group")))
     checker_check = Gtk.CheckButton(label="Checkerboard (grid if disabled)")
     checker_check.set_active(bool(config.get_property("checkerboard")))
-    grid.attach(transform_check, 0, row, 2, 1)
-    grid.attach(analysis_check, 2, row, 2, 1)
+    grid.attach(analysis_check, 0, row, 1, 1)
     row += 1
-    grid.attach(group_check, 0, row, 2, 1)
-    grid.attach(checker_check, 2, row, 2, 1)
+    grid.attach(checker_check, 0, row, 2, 1)
+    grid.attach(group_check, 2, row, 2, 1)
     row += 1
 
     gradient_combo = Gtk.ComboBoxText()
-    for key, label in [("HSV", "HSV"), ("grayscale", "Grayscale"), ("red-blue", "Red-Blue"), ("white-black", "White-Black"), ("custom", "Custom")]:
+    for key, label in [("HSV", "HSV"), ("red-blue", "Red-Blue"), ("grayscale", "Grayscale"), ("white-black", "White-Black"), ("custom", "Custom")]:
         gradient_combo.append(key, label)
     gradient_value = config.get_property("gradient-preset")
     gradient_value = GRADIENT_ID_MAP.get(gradient_value, "HSV") if isinstance(gradient_value, int) else str(gradient_value)
@@ -709,47 +712,27 @@ def _show_dialog(procedure, config, width, height):
     grid.attach(gradient_combo, 1, row, 1, 1)
 
     gradient_entry = Gtk.Entry()
-    gradient_entry.set_text(config.get_property("gradient-custom"))
+    gradient_entry.set_text(config.get_property("gradient-custom") or "")
     custom_palette_label = Gtk.Label(label="Custom palette", xalign=0.0)
     custom_palette_label.set_tooltip_text("Comma-separated #RRGGBB values for custom colors. Used when Custom palette is selected.")
-    grid.attach(custom_palette_label, 2, row, 1, 1)
-    gradient_entry.set_tooltip_text("Comma-separated #RRGGBB values for custom colors. Example: #ff0000,#00ff00,#0000ff")
-    grid.attach(gradient_entry, 3, row, 1, 1)
-    row += 1
 
     def _pick_color(_button):
         chooser = Gtk.ColorChooserDialog(title="Pick color", transient_for=dialog, modal=True)
         chooser.set_use_alpha(False)
         if chooser.run() == Gtk.ResponseType.OK:
             rgba = chooser.get_rgba()
-            hex_value = "#{:02x}{:02x}{:02x}".format(int(rgba.red * 255), int(rgba.green * 255), int(rgba.blue * 255))
+            hex_value = "#{:02x}{:02x}{:02x}".format(round(rgba.red * 255), round(rgba.green * 255), round(rgba.blue * 255))
             current = gradient_entry.get_text().strip()
             gradient_entry.set_text(f"{current},{hex_value}" if current else hex_value)
         chooser.destroy()
 
+    grid.attach(custom_palette_label, 2, row, 1, 1)
+    gradient_entry.set_tooltip_text("Comma-separated #RRGGBB values for custom colors. Example: #ff0000,#00ff00,#0000ff")
+    grid.attach(gradient_entry, 3, row, 1, 1)
     pick_btn = Gtk.Button(label="Pick color…")
     pick_btn.connect("clicked", _pick_color)
-    grid.attach(Gtk.Label(), 2, row, 1, 1)
-    grid.attach(pick_btn, 3, row, 1, 1)
+    grid.attach(pick_btn, 4, row, 1, 1)
     row += 1
-
-    grid_basis_check = Gtk.CheckButton(label="Grid density uses long side")
-    grid_basis_check.set_active(bool(config.get_property("grid-long-side")))
-    grid_basis_check.set_tooltip_text("When enabled, Grid density is measured from the center to the long image side instead of the short side.")
-    grid.attach(grid_basis_check, 0, row, 3, 1)
-    row += 1
-
-    _make_scale(
-        "grid-density",
-        "Grid density (from center to side)",
-        1.0,
-        1000.0,
-        config.get_property("grid-density"),
-        1.0,
-        10.0,
-        digits=2,
-        tooltip="Number of grid lines from the center to the selected image side.",
-    )
 
     log_combo = Gtk.ComboBoxText()
     log_combo.append("2", "2")
@@ -765,18 +748,39 @@ def _show_dialog(procedure, config, width, height):
     grid.attach(log_combo, 1, row, 1, 1)
     row += 1
 
+    grid_basis_check = Gtk.CheckButton(label="Grid density uses long side")
+    grid_basis_check.set_active(bool(config.get_property("grid-long-side")))
+    grid_basis_check.set_tooltip_text("When enabled, grid density is measured from the center to the long image side instead of the short side.")
+    grid.attach(grid_basis_check, 0, row, 3, 1)
+    row += 1
+
+    _make_scale(
+        "grid-density",
+        "Grid density (from center to side)",
+        1.0,
+        100.0,
+        config.get_property("grid-density"),
+        1.0,
+        10.0,
+        digits=2,
+        tooltip="Number of grid lines from the center to the selected image side.",
+    )
+    row += 1
+
     def _sync():
         analysis_enabled = analysis_check.get_active()
         custom_palette = gradient_combo.get_active_id() == "custom"
+        abyss_label.set_sensitive(transform_check.get_active())
+        abyss_combo.set_sensitive(transform_check.get_active())
+        wrap_label.set_sensitive(transform_check.get_active())
+        abyss_spin.set_sensitive(transform_check.get_active())
+        group_check.set_sensitive(analysis_enabled)
+        checker_check.set_sensitive(analysis_enabled)
         palette_label.set_sensitive(analysis_enabled)
         gradient_combo.set_sensitive(analysis_enabled)
         custom_palette_label.set_sensitive(analysis_enabled and custom_palette)
         gradient_entry.set_sensitive(analysis_enabled and custom_palette)
         pick_btn.set_sensitive(analysis_enabled and custom_palette)
-        abyss_label.set_sensitive(transform_check.get_active())
-        abyss_combo.set_sensitive(transform_check.get_active())
-        wrap_label.set_sensitive(transform_check.get_active())
-        abyss_spin.set_sensitive(transform_check.get_active())
         grid_enabled = analysis_enabled
         grid_basis_check.set_sensitive(grid_enabled)
         scale_labels["grid-density"].set_sensitive(grid_enabled)
@@ -784,7 +788,6 @@ def _show_dialog(procedure, config, width, height):
         scale_widgets["grid-density"][1].set_sensitive(grid_enabled)
         log_label.set_sensitive(analysis_enabled)
         log_combo.set_sensitive(analysis_enabled)
-        group_check.set_sensitive(analysis_enabled)
 
     gradient_combo.connect("changed", lambda *_a: _sync())
     transform_check.connect("toggled", lambda *_a: _sync())
