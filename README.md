@@ -4,7 +4,7 @@ This is a plugin-in for [Gimp 3](http://gimp.org) which uses complex functions t
 
 ## Installation
 
-Copy `conformal.py` into your GIMP 3 plug-ins directory and make it executable.
+Copy `conformal.py` into your GIMP 3 plug-ins directory and make it executable. Install SymPy in the Python environment used by GIMP to enable symbolic inverse rendering for `w = f(z)` expressions.
 
 ## Usage
 

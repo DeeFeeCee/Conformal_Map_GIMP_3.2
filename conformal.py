@@ -113,7 +113,7 @@ class ConformalRenderer:
         self.checkerboard = bool(checkerboard)
         self.gradient = gradient or "HSV"
         self.abyss_mode = (abyss_mode or "transparent").strip().lower()
-        self.abyss_loop_iterations = max(1, int(abyss_loop_iterations)) - 1
+        self.abyss_loop_iterations = max(1, int(abyss_loop_iterations))
         self.log_base = str(log_base or "2")
         self.inverse_code = inverse_code
         self.transform_precision = max(0, min(100, int(transform_precision)))
@@ -701,6 +701,15 @@ def _show_dialog(procedure, config, width, height):
         scale_labels[name] = label
         row += 1
 
+    _make_scale("transform-precision", "Forward precision", 0, 100, config.get_property("transform-precision"), 1, 10, digits=0, tooltip="Only used for Python code and non-function equations. Higher values add subpixel samples and increase transform work by roughly n².")
+    precision_help = Gtk.Expander(label="Forward precision help")
+    precision_label = Gtk.Label(label="The Forward precision slider only applies when the formula cannot be treated as a simple w = f(z) expression. For w = f(z), SymPy finds a symbolic inverse and renders by inverse sampling instead.")
+    precision_label.set_xalign(0.0)
+    precision_label.set_line_wrap(True)
+    precision_help.add(precision_label)
+    grid.attach(precision_help, 0, row, 5, 1)
+    row += 1
+
     coord_expander = Gtk.Expander(label="Coordinate/Scale settings")
     coord_expander.set_expanded(False)
     coord_grid = Gtk.Grid(column_spacing=8, row_spacing=8, margin=8)
@@ -759,15 +768,6 @@ def _show_dialog(procedure, config, width, height):
     _make_coord_scale("zoom", "Output zoom", 1.0e-5, 1.0e3, config.get_property("zoom"), 0.01, 0.1, digits=5, tooltip="Zoom factor. Higher values zoom in.")
     _make_coord_scale("output-center-x", "Output center X", -1.0e3, 1.0e3, config.get_property("output-center-x"), 0.01, 0.1, digits=5, tooltip="Output center X coordinate for the rendered image viewport.")
     _make_coord_scale("output-center-y", "Output center Y", -1.0e3, 1.0e3, config.get_property("output-center-y"), 0.01, 0.1, digits=5, tooltip="Output center Y coordinate for the rendered image viewport.")
-    _make_coord_scale("transform-precision", "Forward precision", 0, 100, config.get_property("transform-precision"), 1, 10, digits=0, tooltip="Only used for Python code and non-function equations. Higher values add subpixel samples and increase transform work by roughly n².")
-    precision_help = Gtk.Expander(label="Forward precision help")
-    precision_label = Gtk.Label(label="The Forward precision slider only applies when the formula cannot be treated as a simple w = f(z) expression. For w = f(z), SymPy finds a symbolic inverse and renders by inverse sampling instead.")
-    precision_label.set_xalign(0.0)
-    precision_label.set_line_wrap(True)
-    precision_help.add(precision_label)
-    coord_grid.attach(precision_help, 0, coord_row, 5, 1)
-    coord_row += 1
-
     def _convert_units(_widget):
         old = getattr(_convert_units, "last", "relative")
         new = coord_combo.get_active_id() or "relative"
@@ -1154,10 +1154,16 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     domain_yb = output_center_y - domain_y_half_span
 
     inverse_code = None
+    symbolic_expression = ConformalRenderer._strip_w_assignment(code) is not None
     try:
         inverse_code = ConformalRenderer.symbolic_inverse_code(code)
-    except Exception:
-        inverse_code = None
+    except Exception as exc:
+        if symbolic_expression:
+            Gimp.message(f"Conformal Mapping inverse error: {exc}")
+            return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
+    if symbolic_expression and inverse_code is None:
+        Gimp.message("Conformal Mapping inverse error: SymPy could not solve this expression; use Python code for forward mapping.")
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error("SymPy could not solve this expression"))
 
     try:
         renderer_full = ConformalRenderer(
