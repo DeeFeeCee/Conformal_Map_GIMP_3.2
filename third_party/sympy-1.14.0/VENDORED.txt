@@ -1,0 +1,6 @@
+Package: SymPy
+Version: 1.14.0
+Upstream release: https://github.com/sympy/sympy/releases/tag/1.14.0
+PyPI source distribution SHA256: d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517
+PyPI wheel SHA256: e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5
+License: BSD License (see LICENSE; keep the complete upstream LICENSE when adding/updating the full tree)
