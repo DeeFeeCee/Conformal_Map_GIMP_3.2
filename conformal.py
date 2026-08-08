@@ -26,6 +26,8 @@ import math
 import ast
 import re
 import sys
+from pathlib import Path
+from collections import defaultdict
 from gettext import gettext as _
 
 import gi
@@ -42,6 +44,14 @@ PROC_RENDER = "plug-in-conformal-render"
 _UI_INITIALIZED = False
 GRADIENT_ID_MAP = {0: "HSV", 1: "grayscale", 2: "red-blue", 3: "white-black", 4: "custom"}
 ABYSS_ID_MAP = {0: "transparent", 1: "loop", 2: "reflect", 3: "clamp", 4: "black", 5: "white"}
+VENDORED_SYMPY_PATH = Path(__file__).resolve().parent / "third_party" / "sympy-1.14.0"
+
+
+
+def _ensure_vendored_sympy_path():
+    vendored = str(VENDORED_SYMPY_PATH)
+    if VENDORED_SYMPY_PATH.exists() and vendored not in sys.path:
+        sys.path.insert(0, vendored)
 
 # expose math functions to user equations in a controlled namespace
 MATH_NAMESPACE = {
@@ -87,6 +97,8 @@ class ConformalRenderer:
         abyss_mode,
         abyss_loop_iterations,
         log_base,
+        inverse_code=None,
+        transform_precision=0,
     ):
         self.width = max(1, int(width))
         self.height = max(1, int(height))
@@ -110,8 +122,10 @@ class ConformalRenderer:
         self.checkerboard = bool(checkerboard)
         self.gradient = gradient or "HSV"
         self.abyss_mode = (abyss_mode or "transparent").strip().lower()
-        self.abyss_loop_iterations = max(1, int(abyss_loop_iterations)) - 1
+        self.abyss_loop_iterations = max(1, int(abyss_loop_iterations))
         self.log_base = str(log_base or "2")
+        self.inverse_code = inverse_code
+        self.transform_precision = max(0, min(100, int(transform_precision)))
         self._validate_gradient_setting()
 
         # Build separate output/domain scales for pixel-to-z conversion.
@@ -129,6 +143,7 @@ class ConformalRenderer:
             self._log = math.log(2.0)
 
         self._compiled_code = compile(self.code, "conformal-code", "exec")
+        self._compiled_inverse_code = compile(inverse_code, "conformal-inverse", "exec") if inverse_code else None
         self._compiled_constraint = compile(self.constraint, "conformal-constraint", "exec")
 
     @staticmethod
@@ -155,6 +170,18 @@ class ConformalRenderer:
                 raise ValueError(f"Unsupported code construct: {type(node).__name__}")
 
     @staticmethod
+    def _sympy_expression_to_python(expression):
+        _ensure_vendored_sympy_path()
+        import sympy as sp
+        from sympy.parsing.sympy_parser import parse_expr, standard_transformations, implicit_multiplication_application, convert_xor
+
+        transformations = standard_transformations + (implicit_multiplication_application, convert_xor)
+        z, w = sp.symbols("z w")
+        local_dict = {"z": z, "w": w, "i": sp.I, "I": sp.I}
+        expr = parse_expr(expression, local_dict=local_dict, transformations=transformations, evaluate=False)
+        return sp.sstr(expr).replace("I", "1j")
+
+    @staticmethod
     def _normalize_code(code):
         snippet = (code or "").strip()
         if not snippet:
@@ -163,7 +190,14 @@ class ConformalRenderer:
         snippet = snippet.replace("^", "**")
         # Interpret standalone "i" as the imaginary unit; coefficients must use explicit multiplication, e.g. 0.2*i.
         snippet = re.sub(r"\bi\b", "(1j)", snippet)
-        ConformalRenderer._validate_code_ast(snippet)
+        try:
+            ConformalRenderer._validate_code_ast(snippet)
+        except SyntaxError:
+            expression = ConformalRenderer._strip_w_assignment(snippet)
+            if expression is None:
+                raise
+            snippet = f"w = ({ConformalRenderer._sympy_expression_to_python(expression)})"
+            ConformalRenderer._validate_code_ast(snippet)
         parsed = ast.parse(snippet, mode="exec")
         has_w_assignment = False
         for node in ast.walk(parsed):
@@ -177,6 +211,37 @@ class ConformalRenderer:
         if not has_w_assignment:
             snippet = f"w = ({snippet})"
         return snippet
+
+
+    @staticmethod
+    def _strip_w_assignment(code):
+        snippet = (code or "").strip()
+        if not snippet or "\n" in snippet or ";" in snippet:
+            return None
+        snippet = snippet.replace("^", "**")
+        assignment = re.match(r"^w\s*=\s*(.+)$", snippet, flags=re.DOTALL)
+        if assignment:
+            return assignment.group(1).strip()
+        # A single-line expression can omit the leading "w =".
+        if re.match(r"^[A-Za-z_]\w*\s*=", snippet):
+            return None
+        return snippet
+
+    @staticmethod
+    def symbolic_inverse_code(code):
+        expression = ConformalRenderer._strip_w_assignment(code)
+        if expression is None:
+            return None
+        _ensure_vendored_sympy_path()
+        import sympy as sp
+
+        z, w = sp.symbols("z w")
+        expr = sp.sympify(ConformalRenderer._sympy_expression_to_python(expression), locals={"z": z, "w": w})
+        solutions = sp.solve(sp.Eq(w, expr), z)
+        if not solutions:
+            return None
+        inverse_expr = sp.sstr(solutions[0]).replace("I", "1j")
+        return f"z = ({inverse_expr})"
 
     @staticmethod
     def _clamp_u8(x):
@@ -366,6 +431,88 @@ class ConformalRenderer:
             return (255, 255, 255, 255)
         return (0, 0, 0, 0)
 
+
+    def _evaluate_inverse_point(self, w):
+        if self._compiled_inverse_code is None:
+            return False, 0j
+        env = {"w": w, "z": 0j}
+        env.update(MATH_NAMESPACE)
+        try:
+            exec(self._compiled_inverse_code, {"__builtins__": {}}, env)
+            z = env.get("z", 0j)
+            valid = not (math.isnan(z.real) or math.isnan(z.imag) or math.isinf(z.real) or math.isinf(z.imag))
+        except Exception:
+            return False, 0j
+        return valid, z
+
+    def _source_coord_to_pixel(self, z):
+        sx = int(round((z.real - self.source_xl) * self._source_sx))
+        sy = int(round((self.source_yt - z.imag) * self._source_sy))
+        return sx, sy
+
+    def _domain_coord_to_pixel(self, w):
+        ox = int(round((w.real - self.domain_xl) * self._domain_sx))
+        oy = int(round((self.domain_yt - w.imag) * self._domain_sy))
+        return ox, oy
+
+    def _render_inverse_mapped(self, source_pixels, progress_cb=None):
+        mapped_data = bytearray(self.width * self.height * 4)
+        max_progress = float(self.width * self.height)
+        progress = 0.0
+        for row in range(self.height):
+            base = row * self.width * 4
+            imag = self.domain_yt - (row / self._domain_sy)
+            for col in range(self.width):
+                w = col / self._domain_sx + self.domain_xl + 1j * imag
+                valid, z = self._evaluate_inverse_point(w)
+                if valid:
+                    sx, sy = self._source_coord_to_pixel(z)
+                    mapped_px = self._sample_mapped_pixel(source_pixels, sx, sy)
+                else:
+                    mapped_px = (0, 0, 0, 0)
+                idx = base + (col * 4)
+                mapped_data[idx:idx + 4] = bytes(mapped_px)
+                progress += 1.0
+            if progress_cb is not None:
+                progress_cb(progress / max_progress)
+        return bytes(mapped_data)
+
+    def _render_forward_mapped(self, source_pixels, progress_cb=None):
+        accum = defaultdict(lambda: [0, 0, 0, 0, 0])
+        samples = self.transform_precision + 1
+        max_progress = float(self.width * self.height * samples * samples)
+        progress = 0.0
+        offsets = [(i + 0.5) / samples - 0.5 for i in range(samples)]
+        for sy in range(self.height):
+            imag_base = self.source_yt - (sy / self._source_sy)
+            for sx in range(self.width):
+                sidx = (sy * self.width + sx) * 4
+                px = source_pixels[sidx:sidx + 4]
+                for oy_off in offsets:
+                    z_imag = imag_base - (oy_off / self._source_sy)
+                    for ox_off in offsets:
+                        z = ((sx + ox_off) / self._source_sx + self.source_xl) + 1j * z_imag
+                        valid, w, *_rest = self._evaluate_point(z)
+                        if valid:
+                            ox, oy = self._domain_coord_to_pixel(w)
+                            if 0 <= ox < self.width and 0 <= oy < self.height:
+                                bucket = accum[(ox, oy)]
+                                bucket[0] += px[0]; bucket[1] += px[1]; bucket[2] += px[2]; bucket[3] += px[3]; bucket[4] += 1
+                        progress += 1.0
+                if progress_cb is not None and sx % 16 == 0:
+                    progress_cb(progress / max_progress)
+        mapped_data = bytearray(self.width * self.height * 4)
+        for (ox, oy), bucket in accum.items():
+            count = max(1, bucket[4])
+            idx = (oy * self.width + ox) * 4
+            mapped_data[idx:idx + 4] = bytes((bucket[0] // count, bucket[1] // count, bucket[2] // count, bucket[3] // count))
+        return bytes(mapped_data)
+
+    def render_mapped(self, source_pixels, progress_cb=None):
+        if self._compiled_inverse_code is not None:
+            return self._render_inverse_mapped(source_pixels, progress_cb)
+        return self._render_forward_mapped(source_pixels, progress_cb)
+
     def render(self, source_pixels=None, progress_cb=None):
         arg_data = bytearray(self.width * self.height * 4)
         mod_data = bytearray(self.width * self.height * 4)
@@ -395,8 +542,7 @@ class ConformalRenderer:
                     grid_px = self._grid_pixel(sqr if self.checkerboard else grid_line)
                     if source_pixels is not None:
                         # Convert evaluated w through the unzoomed source/image viewport.
-                        sx = int(round((w.real - self.source_xl) * self._source_sx))
-                        sy = int(round((self.source_yt - w.imag) * self._source_sy))
+                        sx, sy = self._source_coord_to_pixel(w)
                         if 0 <= sx < self.width and 0 <= sy < self.height:
                             sidx = (sy * self.width + sx) * 4
                             mapped_px = tuple(source_pixels[sidx:sidx + 4])
@@ -566,6 +712,15 @@ def _show_dialog(procedure, config, width, height):
         scale_labels[name] = label
         row += 1
 
+    _make_scale("transform-precision", "Forward precision", 0, 100, config.get_property("transform-precision"), 1, 10, digits=0, tooltip="Only used for Python code and non-function equations. Higher values add subpixel samples and increase transform work by roughly n².")
+    precision_help = Gtk.Expander(label="Forward precision help")
+    precision_label = Gtk.Label(label="The Forward precision slider only applies when the formula cannot be treated as a simple w = f(z) expression. For w = f(z), SymPy finds a symbolic inverse and renders by inverse sampling instead.")
+    precision_label.set_xalign(0.0)
+    precision_label.set_line_wrap(True)
+    precision_help.add(precision_label)
+    grid.attach(precision_help, 0, row, 5, 1)
+    row += 1
+
     coord_expander = Gtk.Expander(label="Coordinate/Scale settings")
     coord_expander.set_expanded(False)
     coord_grid = Gtk.Grid(column_spacing=8, row_spacing=8, margin=8)
@@ -618,17 +773,20 @@ def _show_dialog(procedure, config, width, height):
     coord_grid.attach(scale_basis_check, 2, coord_row, 3, 1)
     coord_row += 1
 
-    _make_coord_scale("scale", "Input scale", 1.0e-5, 1.0e3, config.get_property("scale"), 0.01, 0.1, digits=5, tooltip="Coordinate assigned to opposite sides of image (half of short/long side). Applied before zoom.")
-    _make_coord_scale("center-x", "Center X", -1.0e3, 1.0e3, config.get_property("center-x"), 0.01, 0.1, digits=5, tooltip="Center width of the mapped coordinate system.")
-    _make_coord_scale("center-y", "Center Y", -1.0e3, 1.0e3, config.get_property("center-y"), 0.01, 0.1, digits=5, tooltip="Center height of the mapped coordinate system.")
+    _make_coord_scale("scale", "Input scale", 1.0e-5, 1.0e3, config.get_property("scale"), 0.01, 0.1, digits=5, tooltip="Coordinate assigned to opposite sides of input image (half of short/long side). Applied before zoom.")
+    _make_coord_scale("center-x", "Input center X", -1.0e3, 1.0e3, config.get_property("center-x"), 0.01, 0.1, digits=5, tooltip="Input center X coordinate used for sampling the source image.")
+    _make_coord_scale("center-y", "Input center Y", -1.0e3, 1.0e3, config.get_property("center-y"), 0.01, 0.1, digits=5, tooltip="Input center Y coordinate used for sampling the source image.")
     _make_coord_scale("zoom", "Output zoom", 1.0e-5, 1.0e3, config.get_property("zoom"), 0.01, 0.1, digits=5, tooltip="Zoom factor. Higher values zoom in.")
-
+    _make_coord_scale("output-center-x", "Output center X", -1.0e3, 1.0e3, config.get_property("output-center-x"), 0.01, 0.1, digits=5, tooltip="Output center X coordinate for the rendered image viewport.")
+    _make_coord_scale("output-center-y", "Output center Y", -1.0e3, 1.0e3, config.get_property("output-center-y"), 0.01, 0.1, digits=5, tooltip="Output center Y coordinate for the rendered image viewport.")
     def _convert_units(_widget):
         old = getattr(_convert_units, "last", "relative")
         new = coord_combo.get_active_id() or "relative"
         if old != new:
             cx = scale_widgets["center-x"][0].get_value()
             cy = scale_widgets["center-y"][0].get_value()
+            ocx = scale_widgets["output-center-x"][0].get_value()
+            ocy = scale_widgets["output-center-y"][0].get_value()
             selected_side_px = max(width, height) if scale_basis_check.get_active() else min(width, height)
             selected_half_px = selected_side_px / 2.0
             safe_scale = max(abs(scale_widgets["scale"][0].get_value()), 1e-9)
@@ -637,15 +795,19 @@ def _show_dialog(procedure, config, width, height):
             if old == "relative" and new == "pixels":
                 scale_widgets["center-x"][0].set_value(img_cx + (cx / safe_scale) * selected_half_px)
                 scale_widgets["center-y"][0].set_value(img_cy - (cy / safe_scale) * selected_half_px)
+                scale_widgets["output-center-x"][0].set_value(img_cx + (ocx / safe_scale) * selected_half_px)
+                scale_widgets["output-center-y"][0].set_value(img_cy - (ocy / safe_scale) * selected_half_px)
             elif old == "pixels" and new == "relative":
                 scale_widgets["center-x"][0].set_value(((cx - img_cx) / max(selected_half_px, 1e-9)) * safe_scale)
                 scale_widgets["center-y"][0].set_value(((img_cy - cy) / max(selected_half_px, 1e-9)) * safe_scale)
+                scale_widgets["output-center-x"][0].set_value(((ocx - img_cx) / max(selected_half_px, 1e-9)) * safe_scale)
+                scale_widgets["output-center-y"][0].set_value(((img_cy - ocy) / max(selected_half_px, 1e-9)) * safe_scale)
 
         if new == "pixels":
             lower, upper, step, page, digits = -1.0e4, 1.0e4, 0.5, 10.0, 4
         else:
             lower, upper, step, page, digits = -1.0e3, 1.0e3, 0.01, 0.1, 5
-        for key in ("center-x", "center-y"):
+        for key in ("center-x", "center-y", "output-center-x", "output-center-y"):
             scale, spin = scale_widgets[key]
             adj = scale.get_adjustment()
             adj.set_lower(lower)
@@ -799,11 +961,14 @@ def _show_dialog(procedure, config, width, height):
         code_buffer.set_text("w = z")
         scale_widgets["center-x"][0].set_value(0.0)
         scale_widgets["center-y"][0].set_value(0.0)
+        scale_widgets["output-center-x"][0].set_value(0.0)
+        scale_widgets["output-center-y"][0].set_value(0.0)
         scale_widgets["zoom"][0].set_value(1.0)
         scale_widgets["scale"][0].set_value(1.0)
         scale_basis_check.set_active(False)
         grid_basis_check.set_active(False)
         scale_widgets["grid-density"][0].set_value(8.0)
+        scale_widgets["transform-precision"][0].set_value(0.0)
         coord_combo.set_active_id("relative")
         gradient_combo.set_active_id("HSV")
         gradient_entry.set_text("#ff0000,#ffff00,#00ff00,#00ffff,#0000ff")
@@ -820,10 +985,13 @@ def _show_dialog(procedure, config, width, height):
         "code": config.get_property("code"),
         "center-x": config.get_property("center-x"),
         "center-y": config.get_property("center-y"),
+        "output-center-x": config.get_property("output-center-x"),
+        "output-center-y": config.get_property("output-center-y"),
         "zoom": config.get_property("zoom"),
         "scale": config.get_property("scale"),
         "scale-long-side": scale_basis_check.get_active(),
         "grid-density": config.get_property("grid-density"),
+        "transform-precision": config.get_property("transform-precision"),
         "grid-long-side": grid_basis_check.get_active(),
         "coord-system": coord_combo.get_active_id() or "relative",
         "gradient-preset": gradient_combo.get_active_id() or "HSV",
@@ -841,10 +1009,13 @@ def _show_dialog(procedure, config, width, height):
         code_buffer.set_text(last_used["code"])
         scale_widgets["center-x"][0].set_value(float(last_used["center-x"]))
         scale_widgets["center-y"][0].set_value(float(last_used["center-y"]))
+        scale_widgets["output-center-x"][0].set_value(float(last_used["output-center-x"]))
+        scale_widgets["output-center-y"][0].set_value(float(last_used["output-center-y"]))
         scale_widgets["zoom"][0].set_value(float(last_used["zoom"]))
         scale_widgets["scale"][0].set_value(float(last_used["scale"]))
         scale_basis_check.set_active(bool(last_used["scale-long-side"]))
         scale_widgets["grid-density"][0].set_value(float(last_used["grid-density"]))
+        scale_widgets["transform-precision"][0].set_value(float(last_used["transform-precision"]))
         grid_basis_check.set_active(bool(last_used["grid-long-side"]))
         coord_combo.set_active_id(last_used["coord-system"])
         gradient_combo.set_active_id(last_used["gradient-preset"])
@@ -904,6 +1075,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     constraint = "p = True"
     center_x = float(config.get_property("center-x"))
     center_y = float(config.get_property("center-y"))
+    output_center_x = float(config.get_property("output-center-x"))
+    output_center_y = float(config.get_property("output-center-y"))
     zoom = float(config.get_property("zoom"))
     scale_value = float(config.get_property("scale"))
     scale_long_side = bool(config.get_property("scale-long-side"))
@@ -924,6 +1097,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     transform_layer = config.get_property("transform-active-layer")
     create_analysis = config.get_property("create-analysis-layers")
     group_analysis = config.get_property("analysis-group")
+    transform_precision = int(config.get_property("transform-precision"))
 
     if run_mode == Gimp.RunMode.INTERACTIVE:
         if not _show_dialog(procedure, config, width, height):
@@ -932,6 +1106,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         constraint = "p = True"
         center_x = float(config.get_property("center-x"))
         center_y = float(config.get_property("center-y"))
+        output_center_x = float(config.get_property("output-center-x"))
+        output_center_y = float(config.get_property("output-center-y"))
         zoom = float(config.get_property("zoom"))
         scale_value = float(config.get_property("scale"))
         scale_long_side = bool(config.get_property("scale-long-side"))
@@ -952,6 +1128,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         transform_layer = config.get_property("transform-active-layer")
         create_analysis = config.get_property("create-analysis-layers")
         group_analysis = config.get_property("analysis-group")
+        transform_precision = int(config.get_property("transform-precision"))
 
     short_side = float(max(1, min(width, height)))
     long_side = float(max(1, max(width, height)))
@@ -964,6 +1141,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     if coord_system == "pixels":
         center_x = ((center_x - img_cx) / max(selected_half_px, 1e-9)) * safe_scale
         center_y = ((img_cy - center_y) / max(selected_half_px, 1e-9)) * safe_scale
+        output_center_x = ((output_center_x - img_cx) / max(selected_half_px, 1e-9)) * safe_scale
+        output_center_y = ((img_cy - output_center_y) / max(selected_half_px, 1e-9)) * safe_scale
 
     safe_zoom = max(abs(zoom), 1e-9)
     domain_selected_half_span = safe_scale / safe_zoom
@@ -980,10 +1159,22 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     source_yb = center_y - source_y_half_span
 
     # Build the zoomed output/domain viewport for converting output pixels to z.
-    domain_xl = center_x - domain_x_half_span
-    domain_xr = center_x + domain_x_half_span
-    domain_yt = center_y + domain_y_half_span
-    domain_yb = center_y - domain_y_half_span
+    domain_xl = output_center_x - domain_x_half_span
+    domain_xr = output_center_x + domain_x_half_span
+    domain_yt = output_center_y + domain_y_half_span
+    domain_yb = output_center_y - domain_y_half_span
+
+    inverse_code = None
+    symbolic_expression = ConformalRenderer._strip_w_assignment(code) is not None
+    try:
+        inverse_code = ConformalRenderer.symbolic_inverse_code(code)
+    except Exception as exc:
+        if symbolic_expression:
+            Gimp.message(f"Conformal Mapping inverse error: {exc}")
+            return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
+    if symbolic_expression and inverse_code is None:
+        Gimp.message("Conformal Mapping inverse error: SymPy could not solve this expression; use Python code for forward mapping.")
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error("SymPy could not solve this expression"))
 
     try:
         renderer_full = ConformalRenderer(
@@ -1006,6 +1197,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             abyss_mode,
             abyss_loop_iterations,
             log_base,
+            inverse_code,
+            transform_precision,
         )
     except Exception as exc:
         Gimp.message(f"Conformal Mapping input error: {exc}")
@@ -1017,10 +1210,10 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         Gimp.progress_init("Rendering conformal map…")
 
     try:
-        _, _, _, mapped_pixels = renderer_full.render(
-            source_pixels=source_pixels,
-            progress_cb=(lambda value: Gimp.progress_update(value)) if run_mode == Gimp.RunMode.INTERACTIVE else None
-        )
+        mapped_pixels = renderer_full.render_mapped(
+            source_pixels,
+            progress_cb=(lambda value: Gimp.progress_update(value)) if (run_mode == Gimp.RunMode.INTERACTIVE and source_pixels is not None) else None,
+        ) if source_pixels is not None else None
         arg_pixels, mod_pixels, grid_pixels, _ = renderer_full.render(
             source_pixels=None,
             progress_cb=None,
@@ -1138,15 +1331,18 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_string_argument(
             "code",
             "_Formula",
-            "Python code assigning w; multiplication must be explicit, for example 2*z",
+            "Expression w = f(z) or Python code assigning w; w = may be omitted for simple expressions",
             "w = z",
             GObject.ParamFlags.READWRITE,
         )
-        procedure.add_double_argument("center-x", "Center _X", "Center X coordinate", -1.0e9, 1.0e9, 0.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("center-y", "Center _Y", "Center Y coordinate", -1.0e9, 1.0e9, 0.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("center-x", "Input center _X", "Input center X coordinate", -1.0e9, 1.0e9, 0.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("center-y", "Input center _Y", "Input center Y coordinate", -1.0e9, 1.0e9, 0.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("zoom", "Output _zoom", "Zoom factor (higher values zoom in)", -1.0e9, 1.0e9, 1.0, GObject.ParamFlags.READWRITE)
-        procedure.add_double_argument("scale", "Input _scale", "Coordinate assigned to opposite sides of image (half of short/long side). Applied before zoom.", 1.0e-5, 1.0e3, 1.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("output-center-x", "Output center X", "Output center X coordinate", -1.0e9, 1.0e9, 0.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("output-center-y", "Output center Y", "Output center Y coordinate", -1.0e9, 1.0e9, 0.0, GObject.ParamFlags.READWRITE)
+        procedure.add_double_argument("scale", "Input _scale", "Coordinate assigned to opposite sides of input image (half of short/long side). Applied before zoom.", 1.0e-5, 1.0e3, 1.0, GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("scale-long-side", "Scale uses _long side", "Apply Scale to the long image side instead of the short side", False, GObject.ParamFlags.READWRITE)
+        procedure.add_int_argument("transform-precision", "Forward _precision", "Only used for Python code and non-function equations; higher values add subpixel samples and increase work by roughly n²", 0, 100, 0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("grid-density", "Grid _density (from center to side)", "Number of grid lines from the center to the selected image side", 1.0, 1000.0, 8.0, GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("grid-long-side", "Grid density uses l_ong side", "Measure Grid density from the center to the long image side instead of the short side", False, GObject.ParamFlags.READWRITE)
         units_choice = Gimp.Choice.new()
