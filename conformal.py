@@ -45,13 +45,35 @@ _UI_INITIALIZED = False
 GRADIENT_ID_MAP = {0: "HSV", 1: "grayscale", 2: "red-blue", 3: "white-black", 4: "custom"}
 ABYSS_ID_MAP = {0: "transparent", 1: "loop", 2: "reflect", 3: "clamp", 4: "black", 5: "white"}
 VENDORED_SYMPY_PATH = Path(__file__).resolve().parent / "third_party" / "sympy-1.14.0"
+VENDORED_SYMPY_PACKAGE = VENDORED_SYMPY_PATH / "sympy"
+VENDORED_MPMATH_PATH = Path(__file__).resolve().parent / "third_party" / "mpmath-1.4.0"
+VENDORED_MPMATH_PACKAGE = VENDORED_MPMATH_PATH / "mpmath"
 
+
+def _ensure_vendored_package_path(package_name, package_path, module_path):
+    """Put a bundled package ahead of any system installation."""
+    vendored = str(package_path)
+    if not module_path.exists():
+        raise ImportError(f"Bundled {package_name} was not found at {module_path}")
+    if vendored in sys.path:
+        sys.path.remove(vendored)
+    if sys.modules.get(package_name) is None:
+        sys.path.insert(0, vendored)
+        return
+
+    loaded_from = Path(getattr(sys.modules[package_name], "__file__", "")).resolve()
+    if package_path not in loaded_from.parents:
+        raise ImportError(
+            f"A non-bundled {package_name} module is already loaded; restart GIMP so "
+            f"the bundled {package_name} at {package_path} can be used."
+        )
+    sys.path.insert(0, vendored)
 
 
 def _ensure_vendored_sympy_path():
-    vendored = str(VENDORED_SYMPY_PATH)
-    if VENDORED_SYMPY_PATH.exists() and vendored not in sys.path:
-        sys.path.insert(0, vendored)
+    """Put bundled mpmath and SymPy packages ahead of system installations."""
+    _ensure_vendored_package_path("mpmath", VENDORED_MPMATH_PATH, VENDORED_MPMATH_PACKAGE)
+    _ensure_vendored_package_path("sympy", VENDORED_SYMPY_PATH, VENDORED_SYMPY_PACKAGE)
 
 # expose math functions to user equations in a controlled namespace
 MATH_NAMESPACE = {

@@ -4,7 +4,7 @@ This is a plugin-in for [Gimp 3](http://gimp.org) which uses complex functions t
 
 ## Installation
 
-Copy `conformal.py` and the `third_party/` directory into your GIMP 3 plug-ins directory and make `conformal.py` executable. The plugin prefers the bundled SymPy 1.14.0 path under `third_party/sympy-1.14.0` for symbolic inverse rendering.
+Copy `conformal.py` and the `third_party/` directory into your GIMP 3 plug-ins directory and make `conformal.py` executable. The plugin uses the bundled SymPy 1.14.0 path under `third_party/sympy-1.14.0` and its bundled mpmath 1.4.0 dependency under `third_party/mpmath-1.4.0` for symbolic inverse rendering.
 
 ## Usage
 
