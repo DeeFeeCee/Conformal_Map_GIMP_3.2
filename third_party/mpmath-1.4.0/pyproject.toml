@@ -1,0 +1,83 @@
+[build-system]
+requires = ['setuptools>=77', 'setuptools-scm>=8']
+build-backend = 'setuptools.build_meta'
+
+[project]
+name = 'mpmath'
+description = 'Python library for arbitrary-precision floating-point arithmetic'
+authors = [{name = 'Fredrik Johansson', email = 'fredrik.johansson@gmail.com'}]
+license = 'BSD-3-Clause'
+classifiers = ['Topic :: Scientific/Engineering :: Mathematics',
+               'Topic :: Software Development :: Libraries :: Python Modules',
+               'Programming Language :: Python',
+               'Programming Language :: Python :: 3',
+               'Programming Language :: Python :: 3 :: Only',
+               'Programming Language :: Python :: 3.9',
+               'Programming Language :: Python :: 3.10',
+               'Programming Language :: Python :: 3.11',
+               'Programming Language :: Python :: 3.12',
+               'Programming Language :: Python :: 3.13',
+               'Programming Language :: Python :: 3.14',
+               'Programming Language :: Python :: Free Threading :: 2 - Beta',
+               'Programming Language :: Python :: Implementation :: CPython',
+               'Programming Language :: Python :: Implementation :: PyPy']
+dynamic = ['version']
+requires-python = '>=3.9'
+readme = 'README.rst'
+
+[project.urls]
+Homepage = 'https://mpmath.org/'
+'Source Code' = 'https://github.com/mpmath/mpmath'
+'Bug Tracker' = 'https://github.com/mpmath/mpmath/issues'
+Documentation = 'http://mpmath.org/doc/current/'
+
+[project.optional-dependencies]
+tests = ['pytest>=6', 'numpy', 'packaging', 'pytest-timeout',
+         'matplotlib', 'pexpect', 'ipython', 'hypothesis']
+develop = ['mpmath[tests]', 'flake518>=1.5', 'pytest-cov>=7', 'wheel', 'build']
+gmpy2 = ['gmpy2>=2.3']
+gmpy = ['mpmath[gmpy2]']
+gmp = ['python-gmp']
+docs = ['sphinx', 'matplotlib', 'sphinxcontrib-autoprogram']
+ci = ['pytest-xdist', 'diff_cover']
+
+[tool.setuptools]
+zip-safe = true
+
+[tool.setuptools.packages]
+find = {namespaces = false}
+
+[tool.flake8]
+select = ['E101', 'E111', 'E112', 'E113', 'E501', 'E703', 'E712', 'E713',
+          'W191', 'W291', 'W292', 'W293', 'W391']
+exclude = ['.eggs', '.git']
+max_line_length = 200
+
+[tool.setuptools_scm]
+
+[tool.pytest.ini_options]
+testpaths = ['mpmath', 'docs']
+doctest_optionflags = ['IGNORE_EXCEPTION_DETAIL', 'ELLIPSIS']
+addopts = "--durations=20 --doctest-modules --doctest-glob='*.rst'"
+norecursedirs = ['docs/plots', 'demo', '.eggs', '.git', '.hypothesis']
+filterwarnings = ['error::DeprecationWarning']
+xfail_strict = true
+timeout = 600
+
+[tool.coverage.run]
+branch = true
+omit = ['mpmath/tests/*']
+patch = ["subprocess"]
+
+[tool.coverage.html]
+directory = 'build/coverage/html'
+[tool.coverage.report]
+exclude_lines = ['pragma: no cover',
+                 'raise NotImplementedError',
+                 'return NotImplemented',
+                 'if __name__ == .__main__.:']
+show_missing = true
+
+[tool.isort]
+lines_after_imports = 2
+atomic = true
