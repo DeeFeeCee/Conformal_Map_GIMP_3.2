@@ -75,6 +75,30 @@ def _ensure_vendored_sympy_path():
     _ensure_vendored_package_path("mpmath", VENDORED_MPMATH_PATH, VENDORED_MPMATH_PACKAGE)
     _ensure_vendored_package_path("sympy", VENDORED_SYMPY_PATH, VENDORED_SYMPY_PACKAGE)
 
+def _complex_csc(z):
+    return 1 / cmath.sin(z)
+
+
+def _complex_sec(z):
+    return 1 / cmath.cos(z)
+
+
+def _complex_cot(z):
+    return 1 / cmath.tan(z)
+
+
+def _complex_acsc(z):
+    return cmath.asin(1 / z)
+
+
+def _complex_asec(z):
+    return cmath.acos(1 / z)
+
+
+def _complex_acot(z):
+    return cmath.atan(1 / z)
+
+
 # expose math functions to user equations in a controlled namespace
 MATH_NAMESPACE = {
     "math": math,
@@ -91,6 +115,18 @@ for _name in dir(math):
 for _name in dir(cmath):
     if not _name.startswith("_"):
         MATH_NAMESPACE[_name] = getattr(cmath, _name)
+MATH_NAMESPACE.update({
+    "csc": _complex_csc,
+    "sec": _complex_sec,
+    "cot": _complex_cot,
+    "acsc": _complex_acsc,
+    "asec": _complex_asec,
+    "acot": _complex_acot,
+})
+for _arc_name in ("sin", "cos", "tan", "csc", "sec", "cot", "sinh", "cosh", "tanh"):
+    _inverse_name = f"a{_arc_name}"
+    if _inverse_name in MATH_NAMESPACE:
+        MATH_NAMESPACE[f"arc{_arc_name}"] = MATH_NAMESPACE[_inverse_name]
 
 
 class ConformalRenderer:
@@ -200,6 +236,10 @@ class ConformalRenderer:
         transformations = standard_transformations + (implicit_multiplication_application, convert_xor)
         z, w = sp.symbols("z w")
         local_dict = {"z": z, "w": w, "i": sp.I, "I": sp.I}
+        for _arc_name in ("sin", "cos", "tan", "csc", "sec", "cot", "sinh", "cosh", "tanh"):
+            _inverse_name = f"a{_arc_name}"
+            if hasattr(sp, _inverse_name):
+                local_dict[f"arc{_arc_name}"] = getattr(sp, _inverse_name)
         expr = parse_expr(expression, local_dict=local_dict, transformations=transformations, evaluate=False)
         return sp.sstr(expr).replace("I", "1j")
 
@@ -535,6 +575,30 @@ class ConformalRenderer:
             return self._render_inverse_mapped(source_pixels, progress_cb)
         return self._render_forward_mapped(source_pixels, progress_cb)
 
+    def _analysis_value_at_output_point(self, output_point):
+        if self._compiled_inverse_code is not None:
+            valid, z = self._evaluate_inverse_point(output_point)
+            return valid, z
+        valid, w, *_rest = self._evaluate_point(output_point)
+        return valid, w
+
+    def _analysis_components(self, value):
+        try:
+            log_value = cmath.log(value)
+            arg = log_value.imag
+            if arg < 0.0:
+                arg += self._two_pi
+            arg_norm = arg / self._two_pi
+            mod = (log_value.real / self._log) % 1.0
+            sqr = int(math.floor(value.real / self.grid)) + int(math.floor(value.imag / self.grid))
+            sqr = sqr % 2
+            x_mod = abs((value.real / self.grid) - round(value.real / self.grid))
+            y_mod = abs((value.imag / self.grid) - round(value.imag / self.grid))
+            grid_line = (x_mod < 0.03) or (y_mod < 0.03)
+        except Exception:
+            return False, 0.0, 0.0, 0, False
+        return True, arg_norm, mod, sqr, grid_line
+
     def render(self, source_pixels=None, progress_cb=None):
         arg_data = bytearray(self.width * self.height * 4)
         mod_data = bytearray(self.width * self.height * 4)
@@ -551,7 +615,9 @@ class ConformalRenderer:
             for col in range(self.width):
                 # Convert the output column through the zoomed domain viewport.
                 z = col / self._domain_sx + self.domain_xl + 1j * imag
-                valid, w, arg_norm, mod, sqr, grid_line = self._evaluate_point(z)
+                valid, w = self._analysis_value_at_output_point(z)
+                if valid:
+                    valid, arg_norm, mod, sqr, grid_line = self._analysis_components(w)
 
                 if not valid:
                     arg_px = (0, 0, 0, 255)
@@ -734,14 +800,17 @@ def _show_dialog(procedure, config, width, height):
         scale_labels[name] = label
         row += 1
 
-    precision_label = Gtk.Label(label="The Forward precision slider only applies when the formula cannot be treated as a simple w = f(z) expression. For w = f(z), SymPy finds a symbolic inverse and renders by inverse sampling instead.")
-    precision_label.set_xalign(0.0)
-    precision_label.set_line_wrap(True)
-    _make_scale("transform-precision", "Forward precision", 0, 100, config.get_property("transform-precision"), 1, 10, digits=0, tooltip="Only used for Python code and non-function equations. Higher values add subpixel samples and increase transform work by roughly n².")
-    precision_help = Gtk.Expander(label="Forward precision help")
-    precision_help.add(precision_label)
-    grid.attach(precision_help, 0, row, 5, 1)
-    row += 1
+    _make_scale(
+        "transform-precision",
+        "Forward precision",
+        0,
+        100,
+        config.get_property("transform-precision"),
+        1,
+        10,
+        digits=0,
+        tooltip="Higher values add subpixel samples and increase transform work by roughly n². Does not apply to functions of form w = f(z) which use elementary functions.",
+    )
 
     coord_expander = Gtk.Expander(label="Coordinate/Scale settings")
     coord_expander.set_expanded(False)
@@ -1198,6 +1267,9 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         Gimp.message("Conformal Mapping inverse error: SymPy could not solve this expression; use Python code for forward mapping.")
         return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error("SymPy could not solve this expression"))
 
+    print(f"Conformal Mapping interpreted function: {ConformalRenderer._normalize_code(code)}", flush=True)
+    print(f"Conformal Mapping interpreted inverse: {inverse_code or 'none'}", flush=True)
+
     try:
         renderer_full = ConformalRenderer(
             width,
@@ -1364,7 +1436,7 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_double_argument("output-center-y", "Output center Y", "Output center Y coordinate", -1.0e9, 1.0e9, 0.0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("scale", "Input _scale", "Coordinate assigned to opposite sides of input image (half of short/long side). Applied before zoom.", 1.0e-5, 1.0e3, 1.0, GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("scale-long-side", "Scale uses _long side", "Apply Scale to the long image side instead of the short side", False, GObject.ParamFlags.READWRITE)
-        procedure.add_int_argument("transform-precision", "Forward _precision", "Only used for Python code and non-function equations; higher values add subpixel samples and increase work by roughly n²", 0, 100, 0, GObject.ParamFlags.READWRITE)
+        procedure.add_int_argument("transform-precision", "Forward _precision", "Higher values add subpixel samples and increase work by roughly n². Does not apply to functions of form w = f(z) which use elementary functions.", 0, 100, 0, GObject.ParamFlags.READWRITE)
         procedure.add_double_argument("grid-density", "Grid _density (from center to side)", "Number of grid lines from the center to the selected image side", 1.0, 1000.0, 8.0, GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("grid-long-side", "Grid density uses l_ong side", "Measure Grid density from the center to the long image side instead of the short side", False, GObject.ParamFlags.READWRITE)
         units_choice = Gimp.Choice.new()
