@@ -144,7 +144,7 @@ class ConformalRenderer:
         self.checkerboard = bool(checkerboard)
         self.gradient = gradient or "HSV"
         self.abyss_mode = (abyss_mode or "transparent").strip().lower()
-        self.abyss_loop_iterations = max(1, int(abyss_loop_iterations))
+        self.abyss_loop_iterations = max(0, int(abyss_loop_iterations))
         self.log_base = str(log_base or "2")
         self.inverse_code = inverse_code
         self.transform_precision = max(0, min(100, int(transform_precision)))
@@ -734,11 +734,11 @@ def _show_dialog(procedure, config, width, height):
         scale_labels[name] = label
         row += 1
 
-    _make_scale("transform-precision", "Forward precision", 0, 100, config.get_property("transform-precision"), 1, 10, digits=0, tooltip="Only used for Python code and non-function equations. Higher values add subpixel samples and increase transform work by roughly n².")
-    precision_help = Gtk.Expander(label="Forward precision help")
     precision_label = Gtk.Label(label="The Forward precision slider only applies when the formula cannot be treated as a simple w = f(z) expression. For w = f(z), SymPy finds a symbolic inverse and renders by inverse sampling instead.")
     precision_label.set_xalign(0.0)
     precision_label.set_line_wrap(True)
+    _make_scale("transform-precision", "Forward precision", 0, 100, config.get_property("transform-precision"), 1, 10, digits=0, tooltip="Only used for Python code and non-function equations. Higher values add subpixel samples and increase transform work by roughly n².")
+    precision_help = Gtk.Expander(label="Forward precision help")
     precision_help.add(precision_label)
     grid.attach(precision_help, 0, row, 5, 1)
     row += 1
@@ -852,7 +852,7 @@ def _show_dialog(procedure, config, width, height):
     abyss_combo.set_active_id(abyss_value)
     abyss_label = Gtk.Label(label="Abyss mode", xalign=0.0)
     abyss_spin = Gtk.SpinButton()
-    abyss_spin.set_adjustment(Gtk.Adjustment(value=float(config.get_property("abyss-loop-iterations")), lower=1.0, upper=1024.0, step_increment=1.0, page_increment=10.0, page_size=0.0))
+    abyss_spin.set_adjustment(Gtk.Adjustment(value=float(config.get_property("abyss-loop-iterations")), lower=0.0, upper=1024.0, step_increment=1.0, page_increment=10.0, page_size=0.0))
 
     transform_check = Gtk.CheckButton(label="Transform active layer")
     transform_check.set_active(bool(config.get_property("transform-active-layer")))
@@ -1412,7 +1412,7 @@ class ConformalPlugin(Gimp.PlugIn):
             "abyss-loop-iterations",
             "_Wrap iterations",
             "Maximum wrap iterations in loop abyss mode",
-            1,
+            0,
             1024,
             2,
             GObject.ParamFlags.READWRITE,
