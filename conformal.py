@@ -313,7 +313,6 @@ class ConformalRenderer:
 
     @staticmethod
     def _simple_power_inverse_code(expression):
-        """Return an inverse for common z**a expressions without invoking SymPy."""
         normalized = (expression or "").strip().replace("^", "**")
         try:
             tree = ast.parse(normalized, mode="eval")
@@ -338,61 +337,20 @@ class ConformalRenderer:
         return f"z = (w ** ({1.0 / exponent!r}))"
 
     @staticmethod
-    def _python_assignments_to_sympy_expression(code):
-        snippet = (code or "").strip().replace("^", "**")
-        if not snippet:
-            return None
-        try:
-            parsed = ast.parse(snippet, mode="exec")
-        except SyntaxError:
-            return None
-        if any(not isinstance(node, ast.Assign) for node in parsed.body):
-            return None
-
-        _ensure_vendored_sympy_path()
-        import sympy as sp
-
-        z, w_symbol = sp.symbols("z w")
-        current_w = w_symbol
-        saw_w_assignment = False
-        for node in parsed.body:
-            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name) or node.targets[0].id != "w":
-                return None
-            value_text = ast.unparse(node.value)
-            value_text = re.sub(r"\bi\b", "(1j)", value_text)
-            try:
-                current_w = sp.sympify(value_text, locals={"z": z, "w": current_w, "I": sp.I})
-            except Exception:
-                return None
-            saw_w_assignment = True
-        return current_w if saw_w_assignment else None
-
-    @staticmethod
     def symbolic_inverse_code(code):
         expression = ConformalRenderer._strip_w_assignment(code)
+        if expression is None:
+            return None
+
+        simple_inverse = ConformalRenderer._simple_power_inverse_code(expression)
+        if simple_inverse is not None:
+            return simple_inverse
 
         _ensure_vendored_sympy_path()
         import sympy as sp
 
         z, w = sp.symbols("z w")
-        if expression is not None:
-            simple_inverse = ConformalRenderer._simple_power_inverse_code(expression)
-            if simple_inverse is not None:
-                return simple_inverse
-            expr = sp.sympify(ConformalRenderer._sympy_expression_to_python(expression), locals={"z": z, "w": w})
-        else:
-            expr = ConformalRenderer._python_assignments_to_sympy_expression(code)
-            if expr is None:
-                return None
-
-        if expr.is_Pow and expr.base == z and expr.exp.is_number:
-            try:
-                exponent = float(expr.exp)
-                if math.isfinite(exponent) and abs(exponent) >= 1e-12:
-                    return f"z = (w ** ({1.0 / exponent!r}))"
-            except Exception:
-                pass
-
+        expr = sp.sympify(ConformalRenderer._sympy_expression_to_python(expression), locals={"z": z, "w": w})
         with _time_limit(10):
             solutions = sp.solve(sp.Eq(w, expr), z)
         if not solutions:
@@ -596,6 +554,7 @@ class ConformalRenderer:
         if self.abyss_mode == "white":
             return (255, 255, 255, 255)
         return (0, 0, 0, 0)
+
 
 
     def _evaluate_inverse_point(self, w):
