@@ -584,8 +584,6 @@ class ConformalRenderer:
             return (255, 255, 255, 255)
         return (0, 0, 0, 0)
 
-
-
     def _evaluate_inverse_point(self, w):
         if self._compiled_inverse_code is None:
             return False, 0j
