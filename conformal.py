@@ -464,7 +464,7 @@ class ConformalRenderer:
         m = value % period
         return m if m < size else (period - 1) - m
 
-    def _evaluate_point(self, z):
+    def _evaluate_mapping(self, z):
         env = {"z": z, "zz": z * z, "w": 0j, "p": True}
         env.update(MATH_NAMESPACE)
         try:
@@ -486,6 +486,10 @@ class ConformalRenderer:
             valid = valid and not (math.isinf(w.real) or math.isinf(w.imag))
         except Exception:
             valid = False
+        return valid, w
+
+    def _evaluate_point(self, z):
+        valid, w = self._evaluate_mapping(z)
 
         if valid:
             try:
@@ -575,6 +579,38 @@ class ConformalRenderer:
         oy = int(round((self.domain_yt - w.imag) * self._domain_sy))
         return ox, oy
 
+    def _forward_output_bounds(self):
+        min_x = min_y = math.inf
+        max_x = max_y = -math.inf
+        for sy in range(self.height):
+            z_imag = self.source_yt - (sy / self._source_sy)
+            for sx in range(self.width):
+                z = (sx / self._source_sx + self.source_xl) + 1j * z_imag
+                valid, w = self._evaluate_mapping(z)
+                if not valid:
+                    continue
+                min_x = min(min_x, w.real)
+                max_x = max(max_x, w.real)
+                min_y = min(min_y, w.imag)
+                max_y = max(max_y, w.imag)
+
+        if not all(math.isfinite(value) for value in (min_x, max_x, min_y, max_y)):
+            return self.domain_xl, self.domain_xr, self.domain_yt, self.domain_yb
+
+        x_span = max(max_x - min_x, 1e-9)
+        y_span = max(max_y - min_y, 1e-9)
+        x_pad = x_span / max(self.width - 1, 1) * 0.5
+        y_pad = y_span / max(self.height - 1, 1) * 0.5
+        return min_x - x_pad, max_x + x_pad, max_y + y_pad, min_y - y_pad
+
+    def _forward_coord_to_pixel(self, w, bounds):
+        xl, xr, yt, yb = bounds
+        sx = (self.width - 1.0) / max(xr - xl, 1e-9)
+        sy = (self.height - 1.0) / max(yt - yb, 1e-9)
+        ox = int(round((w.real - xl) * sx))
+        oy = int(round((yt - w.imag) * sy))
+        return ox, oy
+
     def _render_inverse_mapped(self, source_pixels, progress_cb=None):
         mapped_data = bytearray(self.width * self.height * 4)
         max_progress = float(self.width * self.height)
@@ -603,6 +639,7 @@ class ConformalRenderer:
         max_progress = float(self.width * self.height * samples * samples)
         progress = 0.0
         offsets = [(i + 0.5) / samples - 0.5 for i in range(samples)]
+        forward_bounds = self._forward_output_bounds()
         for sy in range(self.height):
             imag_base = self.source_yt - (sy / self._source_sy)
             for sx in range(self.width):
@@ -614,7 +651,7 @@ class ConformalRenderer:
                         z = ((sx + ox_off) / self._source_sx + self.source_xl) + 1j * z_imag
                         valid, w, *_rest = self._evaluate_point(z)
                         if valid:
-                            ox, oy = self._domain_coord_to_pixel(w)
+                            ox, oy = self._forward_coord_to_pixel(w, forward_bounds)
                             if 0 <= ox < self.width and 0 <= oy < self.height:
                                 bucket = accum[(ox, oy)]
                                 bucket[0] += px[0]; bucket[1] += px[1]; bucket[2] += px[2]; bucket[3] += px[3]; bucket[4] += 1
