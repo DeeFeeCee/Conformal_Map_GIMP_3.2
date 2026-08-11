@@ -26,6 +26,8 @@ import math
 import ast
 import re
 import sys
+import signal
+from contextlib import contextmanager
 from pathlib import Path
 from collections import defaultdict
 from gettext import gettext as _
@@ -48,6 +50,26 @@ VENDORED_SYMPY_PATH = Path(__file__).resolve().parent / "third_party" / "sympy"
 VENDORED_SYMPY_PACKAGE = VENDORED_SYMPY_PATH / "sympy"
 VENDORED_MPMATH_PATH = Path(__file__).resolve().parent / "third_party" / "mpmath"
 VENDORED_MPMATH_PACKAGE = VENDORED_MPMATH_PATH / "mpmath"
+
+
+@contextmanager
+def _time_limit(seconds):
+    """Temporarily bound operations that may hang, such as symbolic solving."""
+    if seconds is None or seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _handler(_signum, _frame):
+        raise TimeoutError("operation timed out")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    signal.signal(signal.SIGALRM, _handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGALRM, previous_handler)
+        signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
 
 
 def _ensure_vendored_package_path(package_name, package_path, module_path):
@@ -290,16 +312,48 @@ class ConformalRenderer:
         return snippet
 
     @staticmethod
+    def _simple_power_inverse_code(expression):
+        """Return an inverse for common z**a expressions without invoking SymPy."""
+        normalized = (expression or "").strip().replace("^", "**")
+        try:
+            tree = ast.parse(normalized, mode="eval")
+        except SyntaxError:
+            return None
+        body = tree.body
+        if not isinstance(body, ast.BinOp) or not isinstance(body.op, ast.Pow):
+            return None
+        if not isinstance(body.left, ast.Name) or body.left.id != "z":
+            return None
+        exponent_node = body.right
+        if isinstance(exponent_node, ast.UnaryOp) and isinstance(exponent_node.op, (ast.UAdd, ast.USub)) and isinstance(exponent_node.operand, ast.Constant):
+            exponent = float(exponent_node.operand.value)
+            if isinstance(exponent_node.op, ast.USub):
+                exponent = -exponent
+        elif isinstance(exponent_node, ast.Constant) and isinstance(exponent_node.value, (int, float)):
+            exponent = float(exponent_node.value)
+        else:
+            return None
+        if not math.isfinite(exponent) or abs(exponent) < 1e-12:
+            return None
+        return f"z = (w ** ({1.0 / exponent!r}))"
+
+    @staticmethod
     def symbolic_inverse_code(code):
         expression = ConformalRenderer._strip_w_assignment(code)
         if expression is None:
             return None
+
+        simple_inverse = ConformalRenderer._simple_power_inverse_code(expression)
+        if simple_inverse is not None:
+            return simple_inverse
+
         _ensure_vendored_sympy_path()
         import sympy as sp
 
         z, w = sp.symbols("z w")
         expr = sp.sympify(ConformalRenderer._sympy_expression_to_python(expression), locals={"z": z, "w": w})
-        solutions = sp.solve(sp.Eq(w, expr), z)
+        with _time_limit(10):
+            solutions = sp.solve(sp.Eq(w, expr), z)
         if not solutions:
             return None
         inverse_expr = sp.sstr(solutions[0]).replace("I", "1j")
@@ -455,6 +509,10 @@ class ConformalRenderer:
         return True, w, arg_norm, mod, sqr, grid_line
 
     def _sample_mapped_pixel(self, source_pixels, sx, sy):
+        if 0 <= sx < self.width and 0 <= sy < self.height:
+            sidx = (sy * self.width + sx) * 4
+            return tuple(source_pixels[sidx:sidx + 4])
+
         if 0 <= sx < self.width:
             tile_x = 0
         elif sx < 0:
@@ -631,11 +689,7 @@ class ConformalRenderer:
                     if source_pixels is not None:
                         # Convert evaluated w through the unzoomed source/image viewport.
                         sx, sy = self._source_coord_to_pixel(w)
-                        if 0 <= sx < self.width and 0 <= sy < self.height:
-                            sidx = (sy * self.width + sx) * 4
-                            mapped_px = tuple(source_pixels[sidx:sidx + 4])
-                        else:
-                            mapped_px = self._sample_mapped_pixel(source_pixels, sx, sy)
+                        mapped_px = self._sample_mapped_pixel(source_pixels, sx, sy)
 
                 idx = base + (col * 4)
                 arg_data[idx:idx + 4] = bytes(arg_px)
@@ -1229,6 +1283,15 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     img_cx = (width - 1) / 2.0
     img_cy = (height - 1) / 2.0
 
+    if not transform_layer and not create_analysis:
+        Gimp.message("Conformal Mapping: select Transform active layer and/or Add analysis layers to run.")
+        return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
+
+    source = drawables[0] if drawables else image.get_active_layer()
+    if transform_layer and source is None:
+        Gimp.message("Conformal Mapping: no active layer is available to transform.")
+        return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
+
     if coord_system == "pixels":
         center_x = ((center_x - img_cx) / max(selected_half_px, 1e-9)) * safe_scale
         center_y = ((img_cy - center_y) / max(selected_half_px, 1e-9)) * safe_scale
@@ -1297,8 +1360,11 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     except Exception as exc:
         Gimp.message(f"Conformal Mapping input error: {exc}")
         return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
-    source = drawables[0] if drawables else image.get_active_layer()
-    source_pixels = _drawable_pixels_rgba(source, width, height) if (transform_layer and source is not None) else None
+    try:
+        source_pixels = _drawable_pixels_rgba(source, width, height) if transform_layer else None
+    except Exception as exc:
+        Gimp.message(f"Conformal Mapping source layer error: {exc}")
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
 
     if run_mode == Gimp.RunMode.INTERACTIVE:
         Gimp.progress_init("Rendering conformal map…")
@@ -1308,17 +1374,26 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             source_pixels,
             progress_cb=(lambda value: Gimp.progress_update(value)) if (run_mode == Gimp.RunMode.INTERACTIVE and source_pixels is not None) else None,
         ) if source_pixels is not None else None
-        arg_pixels, mod_pixels, grid_pixels, _ = renderer_full.render(
-            source_pixels=None,
-            progress_cb=None,
-        )
+        if create_analysis:
+            arg_pixels, mod_pixels, grid_pixels, _ = renderer_full.render(
+                source_pixels=None,
+                progress_cb=None,
+            )
+        else:
+            arg_pixels = mod_pixels = grid_pixels = None
     except Exception as exc:
         Gimp.message(f"Conformal Mapping render error: {exc}")
         return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
 
     image.undo_group_start()
     # Gets active layer's name & appends space if name == Layer (default layer name in English)
-    layer_name = "" if source.get_name() == "Layer" else source.get_name() + " "
+    try:
+        source_name = source.get_name() if source is not None else ""
+    except Exception as exc:
+        image.undo_group_end()
+        Gimp.message(f"Conformal Mapping source layer error: {exc}")
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
+    layer_name = "" if source_name in ("", "Layer") else source_name + " "
     try:
         if transform_layer and mapped_pixels is not None:
             mapped_layer = Gimp.Layer.new(
@@ -1387,6 +1462,9 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         )
         parasite = Gimp.Parasite.new("gimp-comment", Gimp.PARASITE_PERSISTENT, comment.encode("utf-8"))
         image.attach_parasite(parasite)
+    except Exception as exc:
+        Gimp.message(f"Conformal Mapping layer write error: {exc}")
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
     finally:
         image.undo_group_end()
 
