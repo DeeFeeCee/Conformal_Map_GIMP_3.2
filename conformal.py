@@ -45,7 +45,7 @@ CONF_VERSION = "0.3.10"
 PROC_RENDER = "plug-in-conformal-render"
 _UI_INITIALIZED = False
 GRADIENT_ID_MAP = {0: "HSV", 1: "grayscale", 2: "red-blue", 3: "white-black", 4: "custom"}
-ABYSS_ID_MAP = {0: "loop", 1: "reflect", 2: "transparent", 3: "foreground", 4: "background", 5: "black", 6: "white"}
+ABYSS_ID_MAP = {0: "loop", 1: "reflect", 2: "clamp", 3: "transparent", 4: "foreground", 5: "background", 6: "black", 7: "white"}
 THIRD_PARTY_PATH = Path(__file__).resolve().parent / "third_party"
 VENDORED_SYMPY_PATH = THIRD_PARTY_PATH / "sympy"
 VENDORED_SYMPY_PACKAGE = VENDORED_SYMPY_PATH / "sympy"
@@ -1112,6 +1112,7 @@ def _show_dialog(procedure, config, width, height):
     for key, label in [
         ("loop", "Loop"),
         ("reflect", "Reflect"),
+        ("clamp", "Clamp"),
         ("transparent", "Transparent"),
         ("foreground", "Foreground color"),
         ("background", "Background color"),
@@ -1702,11 +1703,12 @@ class ConformalPlugin(Gimp.PlugIn):
         choices_abyss = Gimp.Choice.new()
         choices_abyss.add("loop", 0, _("Loop"), "Repeat image in tiles")
         choices_abyss.add("reflect", 1, _("Reflect"), "Mirror-repeat image in tiles")
-        choices_abyss.add("transparent", 2, _("Transparent"), "Transparent outside area")
-        choices_abyss.add("foreground", 3, _("Foreground color"), "Use the current foreground color outside area")
-        choices_abyss.add("background", 4, _("Background color"), "Use the current background color outside area")
-        choices_abyss.add("black", 5, _("Black"), "Black outside area")
-        choices_abyss.add("white", 6, _("White"), "White outside area")
+        choices_abyss.add("clamp", 2, _("Clamp"), "Clamp to nearest edge pixel")
+        choices_abyss.add("transparent", 3, _("Transparent"), "Transparent outside area")
+        choices_abyss.add("foreground", 4, _("Foreground color"), "Use the current foreground color outside area")
+        choices_abyss.add("background", 5, _("Background color"), "Use the current background color outside area")
+        choices_abyss.add("black", 6, _("Black"), "Black outside area")
+        choices_abyss.add("white", 7, _("White"), "White outside area")
         procedure.add_choice_argument(
             "abyss-mode",
             "Abyss _mode",
