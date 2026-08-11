@@ -676,7 +676,9 @@ class ConformalRenderer:
                         z = ((sx + ox_off) / self._source_sx + self.source_xl) + 1j * z_imag
                         valid, w = self._evaluate_mapping(z)
                         if valid:
-                            ox, oy = self._forward_coord_to_pixel(w, forward_bounds)
+                            # Forward splats stay in the source coordinate viewport so
+                            # output zoom/center settings do not normalize them to the canvas.
+                            ox, oy = self._source_coord_to_pixel(w)
                             if 0 <= ox < self.width and 0 <= oy < self.height:
                                 bucket = accum[(ox, oy)]
                                 bucket[0] += px[0]; bucket[1] += px[1]; bucket[2] += px[2]; bucket[3] += px[3]; bucket[4] += 1
