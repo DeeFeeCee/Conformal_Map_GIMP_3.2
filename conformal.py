@@ -26,6 +26,8 @@ import math
 import ast
 import re
 import sys
+import signal
+from contextlib import contextmanager
 from pathlib import Path
 from collections import defaultdict
 from gettext import gettext as _
@@ -44,17 +46,61 @@ PROC_RENDER = "plug-in-conformal-render"
 _UI_INITIALIZED = False
 GRADIENT_ID_MAP = {0: "HSV", 1: "grayscale", 2: "red-blue", 3: "white-black", 4: "custom"}
 ABYSS_ID_MAP = {0: "transparent", 1: "loop", 2: "reflect", 3: "clamp", 4: "black", 5: "white"}
-VENDORED_SYMPY_PATH = Path(__file__).resolve().parent / "third_party" / "sympy"
+THIRD_PARTY_PATH = Path(__file__).resolve().parent / "third_party"
+VENDORED_SYMPY_PATH = THIRD_PARTY_PATH / "sympy"
 VENDORED_SYMPY_PACKAGE = VENDORED_SYMPY_PATH / "sympy"
-VENDORED_MPMATH_PATH = Path(__file__).resolve().parent / "third_party" / "mpmath"
+VENDORED_MPMATH_PATH = THIRD_PARTY_PATH / "mpmath"
 VENDORED_MPMATH_PACKAGE = VENDORED_MPMATH_PATH / "mpmath"
 
 
-def _ensure_vendored_package_path(package_name, package_path, module_path):
+@contextmanager
+def _time_limit(seconds):
+    """Temporarily bound operations that may hang, such as symbolic solving."""
+    if seconds is None or seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _handler(_signum, _frame):
+        raise TimeoutError("operation timed out")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    signal.signal(signal.SIGALRM, _handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGALRM, previous_handler)
+        signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
+
+def _find_vendored_package_path(package_name, preferred_path):
+    """Find the sys.path entry that contains a bundled package directory."""
+    preferred_path = Path(preferred_path).resolve()
+    preferred_module = preferred_path / package_name
+    if (preferred_module / "__init__.py").exists():
+        return preferred_path, preferred_module
+
+    if not THIRD_PARTY_PATH.exists():
+        raise ImportError(f"Bundled {package_name} was not found; missing {THIRD_PARTY_PATH}")
+
+    candidates = []
+    direct_module = THIRD_PARTY_PATH / package_name
+    if (direct_module / "__init__.py").exists():
+        candidates.append((THIRD_PARTY_PATH, direct_module))
+    for child in THIRD_PARTY_PATH.iterdir():
+        module_path = child / package_name
+        if child.is_dir() and (module_path / "__init__.py").exists():
+            candidates.append((child, module_path))
+
+    if candidates:
+        return candidates[0][0].resolve(), candidates[0][1].resolve()
+    raise ImportError(f"Bundled {package_name} was not found under {THIRD_PARTY_PATH}")
+
+
+def _ensure_vendored_package_path(package_name, package_path, module_path=None):
     """Put a bundled package ahead of any system installation."""
+    package_path, module_path = _find_vendored_package_path(package_name, package_path)
     vendored = str(package_path)
-    if not module_path.exists():
-        raise ImportError(f"Bundled {package_name} was not found at {module_path}")
     if vendored in sys.path:
         sys.path.remove(vendored)
     if sys.modules.get(package_name) is None:
@@ -62,10 +108,10 @@ def _ensure_vendored_package_path(package_name, package_path, module_path):
         return
 
     loaded_from = Path(getattr(sys.modules[package_name], "__file__", "")).resolve()
-    if package_path not in loaded_from.parents:
+    if module_path not in (loaded_from, *loaded_from.parents):
         raise ImportError(
             f"A non-bundled {package_name} module is already loaded; restart GIMP so "
-            f"the bundled {package_name} at {package_path} can be used."
+            f"the bundled {package_name} at {module_path} can be used."
         )
     sys.path.insert(0, vendored)
 
@@ -290,16 +336,47 @@ class ConformalRenderer:
         return snippet
 
     @staticmethod
+    def _simple_power_inverse_code(expression):
+        normalized = (expression or "").strip().replace("^", "**")
+        try:
+            tree = ast.parse(normalized, mode="eval")
+        except SyntaxError:
+            return None
+        body = tree.body
+        if not isinstance(body, ast.BinOp) or not isinstance(body.op, ast.Pow):
+            return None
+        if not isinstance(body.left, ast.Name) or body.left.id != "z":
+            return None
+        exponent_node = body.right
+        if isinstance(exponent_node, ast.UnaryOp) and isinstance(exponent_node.op, (ast.UAdd, ast.USub)) and isinstance(exponent_node.operand, ast.Constant):
+            exponent = float(exponent_node.operand.value)
+            if isinstance(exponent_node.op, ast.USub):
+                exponent = -exponent
+        elif isinstance(exponent_node, ast.Constant) and isinstance(exponent_node.value, (int, float)):
+            exponent = float(exponent_node.value)
+        else:
+            return None
+        if not math.isfinite(exponent) or abs(exponent) < 1e-12:
+            return None
+        return f"z = (w ** ({1.0 / exponent!r}))"
+
+    @staticmethod
     def symbolic_inverse_code(code):
         expression = ConformalRenderer._strip_w_assignment(code)
         if expression is None:
             return None
+
+        simple_inverse = ConformalRenderer._simple_power_inverse_code(expression)
+        if simple_inverse is not None:
+            return simple_inverse
+
         _ensure_vendored_sympy_path()
         import sympy as sp
 
         z, w = sp.symbols("z w")
         expr = sp.sympify(ConformalRenderer._sympy_expression_to_python(expression), locals={"z": z, "w": w})
-        solutions = sp.solve(sp.Eq(w, expr), z)
+        with _time_limit(10):
+            solutions = sp.solve(sp.Eq(w, expr), z)
         if not solutions:
             return None
         inverse_expr = sp.sstr(solutions[0]).replace("I", "1j")
@@ -492,6 +569,7 @@ class ConformalRenderer:
         if self.abyss_mode == "white":
             return (255, 255, 255, 255)
         return (0, 0, 0, 0)
+
 
 
     def _evaluate_inverse_point(self, w):
@@ -1229,6 +1307,15 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     img_cx = (width - 1) / 2.0
     img_cy = (height - 1) / 2.0
 
+    if not transform_layer and not create_analysis:
+        Gimp.message("Conformal Mapping: select Transform active layer and/or Add analysis layers to run.")
+        return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
+
+    source = drawables[0] if drawables else image.get_active_layer()
+    if transform_layer and source is None:
+        Gimp.message("Conformal Mapping: no active layer is available to transform.")
+        return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
+
     if coord_system == "pixels":
         center_x = ((center_x - img_cx) / max(selected_half_px, 1e-9)) * safe_scale
         center_y = ((img_cy - center_y) / max(selected_half_px, 1e-9)) * safe_scale
@@ -1297,8 +1384,11 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     except Exception as exc:
         Gimp.message(f"Conformal Mapping input error: {exc}")
         return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
-    source = drawables[0] if drawables else image.get_active_layer()
-    source_pixels = _drawable_pixels_rgba(source, width, height) if (transform_layer and source is not None) else None
+    try:
+        source_pixels = _drawable_pixels_rgba(source, width, height) if transform_layer else None
+    except Exception as exc:
+        Gimp.message(f"Conformal Mapping source layer error: {exc}")
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
 
     if run_mode == Gimp.RunMode.INTERACTIVE:
         Gimp.progress_init("Rendering conformal map…")
@@ -1308,17 +1398,26 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             source_pixels,
             progress_cb=(lambda value: Gimp.progress_update(value)) if (run_mode == Gimp.RunMode.INTERACTIVE and source_pixels is not None) else None,
         ) if source_pixels is not None else None
-        arg_pixels, mod_pixels, grid_pixels, _ = renderer_full.render(
-            source_pixels=None,
-            progress_cb=None,
-        )
+        if create_analysis:
+            arg_pixels, mod_pixels, grid_pixels, _ = renderer_full.render(
+                source_pixels=None,
+                progress_cb=None,
+            )
+        else:
+            arg_pixels = mod_pixels = grid_pixels = None
     except Exception as exc:
         Gimp.message(f"Conformal Mapping render error: {exc}")
         return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
 
     image.undo_group_start()
     # Gets active layer's name & appends space if name == Layer (default layer name in English)
-    layer_name = "" if source.get_name() == "Layer" else source.get_name() + " "
+    try:
+        source_name = source.get_name() if source is not None else ""
+    except Exception as exc:
+        image.undo_group_end()
+        Gimp.message(f"Conformal Mapping source layer error: {exc}")
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
+    layer_name = "" if source_name in ("", "Layer") else source_name + " "
     try:
         if transform_layer and mapped_pixels is not None:
             mapped_layer = Gimp.Layer.new(
@@ -1387,6 +1486,9 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         )
         parasite = Gimp.Parasite.new("gimp-comment", Gimp.PARASITE_PERSISTENT, comment.encode("utf-8"))
         image.attach_parasite(parasite)
+    except Exception as exc:
+        Gimp.message(f"Conformal Mapping layer write error: {exc}")
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
     finally:
         image.undo_group_end()
 
