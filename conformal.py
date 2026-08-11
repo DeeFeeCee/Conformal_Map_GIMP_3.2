@@ -535,7 +535,7 @@ class ConformalRenderer:
             return False, 0j, 0.0, 0.0, 0, False
         return True, w, arg_norm, mod, sqr, grid_line
 
-    def _sample_mapped_pixel(self, source_pixels, sx, sy):
+    def _sample_mapped_pixel(self, source_pixels, sx, sy, use_abyss=True):
         if sx is None or sy is None:
             return (0, 0, 0, 0)
 
@@ -552,6 +552,12 @@ class ConformalRenderer:
             tile_y = ((-sy - 1) // self.height) + 1
         else:
             tile_y = ((sy - self.height) // self.height) + 1
+
+        if not use_abyss:
+            if tile_x == 0 and tile_y == 0:
+                sidx = (sy * self.width + sx) * 4
+                return tuple(source_pixels[sidx:sidx + 4])
+            return (0, 0, 0, 0)
 
         if self.abyss_mode == "clamp":
             sx = min(max(0, sx), self.width - 1)
@@ -655,7 +661,7 @@ class ConformalRenderer:
                 valid, z = self._evaluate_inverse_point(w)
                 if valid:
                     sx, sy = self._source_coord_to_pixel(z)
-                    mapped_px = self._sample_mapped_pixel(source_pixels, sx, sy)
+                    mapped_px = self._sample_mapped_pixel(source_pixels, sx, sy, use_abyss=False)
                 else:
                     mapped_px = (0, 0, 0, 0)
                 idx = base + (col * 4)
