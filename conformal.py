@@ -46,9 +46,10 @@ PROC_RENDER = "plug-in-conformal-render"
 _UI_INITIALIZED = False
 GRADIENT_ID_MAP = {0: "HSV", 1: "grayscale", 2: "red-blue", 3: "white-black", 4: "custom"}
 ABYSS_ID_MAP = {0: "transparent", 1: "loop", 2: "reflect", 3: "clamp", 4: "black", 5: "white"}
-VENDORED_SYMPY_PATH = Path(__file__).resolve().parent / "third_party" / "sympy"
+THIRD_PARTY_PATH = Path(__file__).resolve().parent / "third_party"
+VENDORED_SYMPY_PATH = THIRD_PARTY_PATH / "sympy"
 VENDORED_SYMPY_PACKAGE = VENDORED_SYMPY_PATH / "sympy"
-VENDORED_MPMATH_PATH = Path(__file__).resolve().parent / "third_party" / "mpmath"
+VENDORED_MPMATH_PATH = THIRD_PARTY_PATH / "mpmath"
 VENDORED_MPMATH_PACKAGE = VENDORED_MPMATH_PATH / "mpmath"
 
 
@@ -72,11 +73,34 @@ def _time_limit(seconds):
         signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
 
 
-def _ensure_vendored_package_path(package_name, package_path, module_path):
+def _find_vendored_package_path(package_name, preferred_path):
+    """Find the sys.path entry that contains a bundled package directory."""
+    preferred_path = Path(preferred_path).resolve()
+    preferred_module = preferred_path / package_name
+    if (preferred_module / "__init__.py").exists():
+        return preferred_path, preferred_module
+
+    if not THIRD_PARTY_PATH.exists():
+        raise ImportError(f"Bundled {package_name} was not found; missing {THIRD_PARTY_PATH}")
+
+    candidates = []
+    direct_module = THIRD_PARTY_PATH / package_name
+    if (direct_module / "__init__.py").exists():
+        candidates.append((THIRD_PARTY_PATH, direct_module))
+    for child in THIRD_PARTY_PATH.iterdir():
+        module_path = child / package_name
+        if child.is_dir() and (module_path / "__init__.py").exists():
+            candidates.append((child, module_path))
+
+    if candidates:
+        return candidates[0][0].resolve(), candidates[0][1].resolve()
+    raise ImportError(f"Bundled {package_name} was not found under {THIRD_PARTY_PATH}")
+
+
+def _ensure_vendored_package_path(package_name, package_path, module_path=None):
     """Put a bundled package ahead of any system installation."""
+    package_path, module_path = _find_vendored_package_path(package_name, package_path)
     vendored = str(package_path)
-    if not module_path.exists():
-        raise ImportError(f"Bundled {package_name} was not found at {module_path}")
     if vendored in sys.path:
         sys.path.remove(vendored)
     if sys.modules.get(package_name) is None:
@@ -84,10 +108,10 @@ def _ensure_vendored_package_path(package_name, package_path, module_path):
         return
 
     loaded_from = Path(getattr(sys.modules[package_name], "__file__", "")).resolve()
-    if package_path not in loaded_from.parents:
+    if module_path not in (loaded_from, *loaded_from.parents):
         raise ImportError(
             f"A non-bundled {package_name} module is already loaded; restart GIMP so "
-            f"the bundled {package_name} at {package_path} can be used."
+            f"the bundled {package_name} at {module_path} can be used."
         )
     sys.path.insert(0, vendored)
 
