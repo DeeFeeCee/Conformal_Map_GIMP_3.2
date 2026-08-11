@@ -4,7 +4,7 @@
 conformal.py
 Conformal map renderer for GIMP 3.2+
 Copyright (C) 2006-2011  Michael J. Gruber <conformal@drmicha.warpmail.net>
-Updated for version 3.2 by DeeFeeCee
+Updated for GIMP 3.2 by DeeFeeCee
 
 This plug-in ports the original GIMP 2 plug-in to the GIMP 3 API
 
@@ -44,9 +44,9 @@ PROC_RENDER = "plug-in-conformal-render"
 _UI_INITIALIZED = False
 GRADIENT_ID_MAP = {0: "HSV", 1: "grayscale", 2: "red-blue", 3: "white-black", 4: "custom"}
 ABYSS_ID_MAP = {0: "transparent", 1: "loop", 2: "reflect", 3: "clamp", 4: "black", 5: "white"}
-VENDORED_SYMPY_PATH = Path(__file__).resolve().parent / "third_party" / "sympy-1.14.0"
+VENDORED_SYMPY_PATH = Path(__file__).resolve().parent / "third_party" / "sympy"
 VENDORED_SYMPY_PACKAGE = VENDORED_SYMPY_PATH / "sympy"
-VENDORED_MPMATH_PATH = Path(__file__).resolve().parent / "third_party" / "mpmath-1.4.0"
+VENDORED_MPMATH_PATH = Path(__file__).resolve().parent / "third_party" / "mpmath"
 VENDORED_MPMATH_PACKAGE = VENDORED_MPMATH_PATH / "mpmath"
 
 
