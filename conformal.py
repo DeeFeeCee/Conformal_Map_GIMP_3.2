@@ -578,8 +578,6 @@ class ConformalRenderer:
             return (255, 255, 255, 255)
         return (0, 0, 0, 0)
 
-
-
     def _evaluate_inverse_point(self, w):
         if self._compiled_inverse_code is None:
             return False, 0j
@@ -663,13 +661,21 @@ class ConformalRenderer:
                 progress += 1.0
             if progress_cb is not None:
                 progress_cb(progress / max_progress)
+
+        if self.abyss_mode != "transparent":
+            # Paint the actual transformed image over any abyss fill, so abyss pixels
+            # cannot cover source pixels even when wrap iterations are zero.
+            forward_mapped = self._render_forward_mapped(source_pixels)
+            for idx in range(0, len(mapped_data), 4):
+                if forward_mapped[idx + 3] > 0:
+                    mapped_data[idx:idx + 4] = forward_mapped[idx:idx + 4]
         return bytes(mapped_data)
 
     def _accumulate_forward_pixel(self, accum, source_pixels, sx, sy, z):
         valid, w, *_rest = self._evaluate_point(z)
         if not valid:
             return None
-        ox, oy = self._source_coord_to_pixel(w)
+        ox, oy = self._domain_coord_to_pixel(w)
         if ox is None or oy is None or not (0 <= ox < self.width and 0 <= oy < self.height):
             return None
         sidx = (sy * self.width + sx) * 4
