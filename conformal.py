@@ -45,7 +45,7 @@ CONF_VERSION = "0.3.10"
 PROC_RENDER = "plug-in-conformal-render"
 _UI_INITIALIZED = False
 GRADIENT_ID_MAP = {0: "HSV", 1: "grayscale", 2: "red-blue", 3: "white-black", 4: "custom"}
-ABYSS_ID_MAP = {0: "transparent", 1: "loop", 2: "reflect", 3: "clamp", 4: "black", 5: "white"}
+ABYSS_ID_MAP = {0: "loop", 1: "reflect", 2: "clamp", 3: "transparent", 4: "foreground", 5: "background", 6: "black", 7: "white"}
 THIRD_PARTY_PATH = Path(__file__).resolve().parent / "third_party"
 VENDORED_SYMPY_PATH = THIRD_PARTY_PATH / "sympy"
 VENDORED_SYMPY_PACKAGE = VENDORED_SYMPY_PATH / "sympy"
@@ -203,6 +203,8 @@ class ConformalRenderer:
         log_base,
         inverse_code=None,
         transform_precision=0,
+        abyss_foreground_color=(0, 0, 0, 255),
+        abyss_background_color=(255, 255, 255, 255),
     ):
         self.width = max(1, int(width))
         self.height = max(1, int(height))
@@ -230,6 +232,8 @@ class ConformalRenderer:
         self.log_base = str(log_base or "2")
         self.inverse_code = inverse_code
         self.transform_precision = max(0, min(100, int(transform_precision)))
+        self.abyss_foreground_color = tuple(abyss_foreground_color or (0, 0, 0, 255))
+        self.abyss_background_color = tuple(abyss_background_color or (255, 255, 255, 255))
         self._validate_gradient_setting()
 
         # Build separate output/domain scales for pixel-to-z conversion.
@@ -572,13 +576,15 @@ class ConformalRenderer:
             sy = self._mirror_coord(sy, self.height)
             sidx = (sy * self.width + sx) * 4
             return tuple(source_pixels[sidx:sidx + 4])
+        if self.abyss_mode == "foreground":
+            return self.abyss_foreground_color
+        if self.abyss_mode == "background":
+            return self.abyss_background_color
         if self.abyss_mode == "black":
             return (0, 0, 0, 255)
         if self.abyss_mode == "white":
             return (255, 255, 255, 255)
         return (0, 0, 0, 0)
-
-
 
     def _evaluate_inverse_point(self, w):
         if self._compiled_inverse_code is None:
@@ -663,13 +669,20 @@ class ConformalRenderer:
                 progress += 1.0
             if progress_cb is not None:
                 progress_cb(progress / max_progress)
+
+        # Paint the actual transformed image over the abyss fill, so abyss pixels
+        # cannot cover source pixels even when wrap iterations are zero.
+        forward_mapped = self._render_forward_mapped(source_pixels)
+        for idx in range(0, len(mapped_data), 4):
+            if forward_mapped[idx + 3] > 0:
+                mapped_data[idx:idx + 4] = forward_mapped[idx:idx + 4]
         return bytes(mapped_data)
 
     def _accumulate_forward_pixel(self, accum, source_pixels, sx, sy, z):
         valid, w, *_rest = self._evaluate_point(z)
         if not valid:
             return None
-        ox, oy = self._source_coord_to_pixel(w)
+        ox, oy = self._domain_coord_to_pixel(w)
         if ox is None or oy is None or not (0 <= ox < self.width and 0 <= oy < self.height):
             return None
         sidx = (sy * self.width + sx) * 4
@@ -1078,7 +1091,16 @@ def _show_dialog(procedure, config, width, height):
     _convert_units(None)
 
     abyss_combo = Gtk.ComboBoxText()
-    for key, label in [("transparent", "Transparent"), ("loop", "Loop"), ("reflect", "Reflect"), ("clamp", "Clamp"), ("black", "Black"), ("white", "White")]:
+    for key, label in [
+        ("loop", "Loop"),
+        ("reflect", "Reflect"),
+        ("clamp", "Clamp"),
+        ("transparent", "Transparent"),
+        ("foreground", "Foreground color"),
+        ("background", "Background color"),
+        ("black", "Black"),
+        ("white", "White"),
+    ]:
         abyss_combo.append(key, label)
     abyss_value = config.get_property("abyss-mode")
     abyss_value = ABYSS_ID_MAP.get(abyss_value, "transparent") if isinstance(abyss_value, int) else str(abyss_value)
@@ -1445,6 +1467,9 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     print(f"Conformal Mapping interpreted function: {ConformalRenderer._normalize_code(code)}", flush=True)
     print(f"Conformal Mapping interpreted inverse: {inverse_code or 'none'}", flush=True)
 
+    abyss_foreground_color = _gegl_to_u8(Gimp.context_get_foreground())
+    abyss_background_color = _gegl_to_u8(Gimp.context_get_background())
+
     try:
         renderer_full = ConformalRenderer(
             width,
@@ -1468,6 +1493,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             log_base,
             inverse_code,
             transform_precision,
+            abyss_foreground_color,
+            abyss_background_color,
         )
     except Exception as exc:
         Gimp.message(f"Conformal Mapping input error: {exc}")
@@ -1656,12 +1683,14 @@ class ConformalPlugin(Gimp.PlugIn):
             GObject.ParamFlags.READWRITE,
         )
         choices_abyss = Gimp.Choice.new()
-        choices_abyss.add("transparent", 0, _("Transparent"), "Transparent outside area")
-        choices_abyss.add("loop", 1, _("Loop"), "Repeat image in tiles")
-        choices_abyss.add("reflect", 2, _("Reflect"), "Mirror-repeat image in tiles")
-        choices_abyss.add("clamp", 3, _("Clamp"), "Clamp to nearest edge pixel")
-        choices_abyss.add("black", 4, _("Black"), "Black outside area")
-        choices_abyss.add("white", 5, _("White"), "White outside area")
+        choices_abyss.add("loop", 0, _("Loop"), "Repeat image in tiles")
+        choices_abyss.add("reflect", 1, _("Reflect"), "Mirror-repeat image in tiles")
+        choices_abyss.add("clamp", 2, _("Clamp"), "Clamp to nearest edge pixel")
+        choices_abyss.add("transparent", 3, _("Transparent"), "Transparent outside area")
+        choices_abyss.add("foreground", 4, _("Foreground color"), "Use the current foreground color outside area")
+        choices_abyss.add("background", 5, _("Background color"), "Use the current background color outside area")
+        choices_abyss.add("black", 6, _("Black"), "Black outside area")
+        choices_abyss.add("white", 7, _("White"), "White outside area")
         procedure.add_choice_argument(
             "abyss-mode",
             "Abyss _mode",
