@@ -26,6 +26,8 @@ import math
 import ast
 import re
 import sys
+import signal
+from contextlib import contextmanager
 from pathlib import Path
 from collections import defaultdict
 from gettext import gettext as _
@@ -44,17 +46,61 @@ PROC_RENDER = "plug-in-conformal-render"
 _UI_INITIALIZED = False
 GRADIENT_ID_MAP = {0: "HSV", 1: "grayscale", 2: "red-blue", 3: "white-black", 4: "custom"}
 ABYSS_ID_MAP = {0: "transparent", 1: "loop", 2: "reflect", 3: "clamp", 4: "black", 5: "white"}
-VENDORED_SYMPY_PATH = Path(__file__).resolve().parent / "third_party" / "sympy"
+THIRD_PARTY_PATH = Path(__file__).resolve().parent / "third_party"
+VENDORED_SYMPY_PATH = THIRD_PARTY_PATH / "sympy"
 VENDORED_SYMPY_PACKAGE = VENDORED_SYMPY_PATH / "sympy"
-VENDORED_MPMATH_PATH = Path(__file__).resolve().parent / "third_party" / "mpmath"
+VENDORED_MPMATH_PATH = THIRD_PARTY_PATH / "mpmath"
 VENDORED_MPMATH_PACKAGE = VENDORED_MPMATH_PATH / "mpmath"
 
 
-def _ensure_vendored_package_path(package_name, package_path, module_path):
+@contextmanager
+def _time_limit(seconds):
+    """Temporarily bound operations that may hang, such as symbolic solving."""
+    if seconds is None or seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _handler(_signum, _frame):
+        raise TimeoutError("operation timed out")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    signal.signal(signal.SIGALRM, _handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGALRM, previous_handler)
+        signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
+
+def _find_vendored_package_path(package_name, preferred_path):
+    """Find the sys.path entry that contains a bundled package directory."""
+    preferred_path = Path(preferred_path).resolve()
+    preferred_module = preferred_path / package_name
+    if (preferred_module / "__init__.py").exists():
+        return preferred_path, preferred_module
+
+    if not THIRD_PARTY_PATH.exists():
+        raise ImportError(f"Bundled {package_name} was not found; missing {THIRD_PARTY_PATH}")
+
+    candidates = []
+    direct_module = THIRD_PARTY_PATH / package_name
+    if (direct_module / "__init__.py").exists():
+        candidates.append((THIRD_PARTY_PATH, direct_module))
+    for child in THIRD_PARTY_PATH.iterdir():
+        module_path = child / package_name
+        if child.is_dir() and (module_path / "__init__.py").exists():
+            candidates.append((child, module_path))
+
+    if candidates:
+        return candidates[0][0].resolve(), candidates[0][1].resolve()
+    raise ImportError(f"Bundled {package_name} was not found under {THIRD_PARTY_PATH}")
+
+
+def _ensure_vendored_package_path(package_name, package_path, module_path=None):
     """Put a bundled package ahead of any system installation."""
+    package_path, module_path = _find_vendored_package_path(package_name, package_path)
     vendored = str(package_path)
-    if not module_path.exists():
-        raise ImportError(f"Bundled {package_name} was not found at {module_path}")
     if vendored in sys.path:
         sys.path.remove(vendored)
     if sys.modules.get(package_name) is None:
@@ -62,10 +108,10 @@ def _ensure_vendored_package_path(package_name, package_path, module_path):
         return
 
     loaded_from = Path(getattr(sys.modules[package_name], "__file__", "")).resolve()
-    if package_path not in loaded_from.parents:
+    if module_path not in (loaded_from, *loaded_from.parents):
         raise ImportError(
             f"A non-bundled {package_name} module is already loaded; restart GIMP so "
-            f"the bundled {package_name} at {package_path} can be used."
+            f"the bundled {package_name} at {module_path} can be used."
         )
     sys.path.insert(0, vendored)
 
@@ -290,16 +336,47 @@ class ConformalRenderer:
         return snippet
 
     @staticmethod
+    def _simple_power_inverse_code(expression):
+        normalized = (expression or "").strip().replace("^", "**")
+        try:
+            tree = ast.parse(normalized, mode="eval")
+        except SyntaxError:
+            return None
+        body = tree.body
+        if not isinstance(body, ast.BinOp) or not isinstance(body.op, ast.Pow):
+            return None
+        if not isinstance(body.left, ast.Name) or body.left.id != "z":
+            return None
+        exponent_node = body.right
+        if isinstance(exponent_node, ast.UnaryOp) and isinstance(exponent_node.op, (ast.UAdd, ast.USub)) and isinstance(exponent_node.operand, ast.Constant):
+            exponent = float(exponent_node.operand.value)
+            if isinstance(exponent_node.op, ast.USub):
+                exponent = -exponent
+        elif isinstance(exponent_node, ast.Constant) and isinstance(exponent_node.value, (int, float)):
+            exponent = float(exponent_node.value)
+        else:
+            return None
+        if not math.isfinite(exponent) or abs(exponent) < 1e-12:
+            return None
+        return f"z = (w ** ({1.0 / exponent!r}))"
+
+    @staticmethod
     def symbolic_inverse_code(code):
         expression = ConformalRenderer._strip_w_assignment(code)
         if expression is None:
             return None
+
+        simple_inverse = ConformalRenderer._simple_power_inverse_code(expression)
+        if simple_inverse is not None:
+            return simple_inverse
+
         _ensure_vendored_sympy_path()
         import sympy as sp
 
         z, w = sp.symbols("z w")
         expr = sp.sympify(ConformalRenderer._sympy_expression_to_python(expression), locals={"z": z, "w": w})
-        solutions = sp.solve(sp.Eq(w, expr), z)
+        with _time_limit(10):
+            solutions = sp.solve(sp.Eq(w, expr), z)
         if not solutions:
             return None
         inverse_expr = sp.sstr(solutions[0]).replace("I", "1j")
@@ -455,6 +532,9 @@ class ConformalRenderer:
         return True, w, arg_norm, mod, sqr, grid_line
 
     def _sample_mapped_pixel(self, source_pixels, sx, sy):
+        if sx is None or sy is None:
+            return (0, 0, 0, 0)
+
         if 0 <= sx < self.width:
             tile_x = 0
         elif sx < 0:
@@ -494,6 +574,7 @@ class ConformalRenderer:
         return (0, 0, 0, 0)
 
 
+
     def _evaluate_inverse_point(self, w):
         if self._compiled_inverse_code is None:
             return False, 0j
@@ -507,14 +588,22 @@ class ConformalRenderer:
             return False, 0j
         return valid, z
 
+    def _safe_round_to_int(self, value):
+        try:
+            if not math.isfinite(value):
+                return None
+            return int(round(value))
+        except Exception:
+            return None
+
     def _source_coord_to_pixel(self, z):
-        sx = int(round((z.real - self.source_xl) * self._source_sx))
-        sy = int(round((self.source_yt - z.imag) * self._source_sy))
+        sx = self._safe_round_to_int((z.real - self.source_xl) * self._source_sx)
+        sy = self._safe_round_to_int((self.source_yt - z.imag) * self._source_sy)
         return sx, sy
 
     def _domain_coord_to_pixel(self, w):
-        ox = int(round((w.real - self.domain_xl) * self._domain_sx))
-        oy = int(round((self.domain_yt - w.imag) * self._domain_sy))
+        ox = self._safe_round_to_int((w.real - self.domain_xl) * self._domain_sx)
+        oy = self._safe_round_to_int((self.domain_yt - w.imag) * self._domain_sy)
         return ox, oy
 
     def _render_inverse_mapped(self, source_pixels, progress_cb=None):
@@ -539,30 +628,72 @@ class ConformalRenderer:
                 progress_cb(progress / max_progress)
         return bytes(mapped_data)
 
+    def _accumulate_forward_pixel(self, accum, source_pixels, sx, sy, z):
+        valid, w, *_rest = self._evaluate_point(z)
+        if not valid:
+            return None
+        ox, oy = self._source_coord_to_pixel(w)
+        if ox is None or oy is None or not (0 <= ox < self.width and 0 <= oy < self.height):
+            return None
+        sidx = (sy * self.width + sx) * 4
+        px = source_pixels[sidx:sidx + 4]
+        bucket = accum[(ox, oy)]
+        bucket[0] += px[0]; bucket[1] += px[1]; bucket[2] += px[2]; bucket[3] += px[3]; bucket[4] += 1
+        return ox, oy
+
+    def _forward_center_outputs(self, accum, source_pixels):
+        outputs = [[None for _x in range(self.width)] for _y in range(self.height)]
+        for sy in range(self.height):
+            imag = self.source_yt - (sy / self._source_sy)
+            for sx in range(self.width):
+                z = (sx / self._source_sx + self.source_xl) + 1j * imag
+                outputs[sy][sx] = self._accumulate_forward_pixel(accum, source_pixels, sx, sy, z)
+        return outputs
+
+    @staticmethod
+    def _adjacent_or_overlapping(a, b):
+        return a is not None and b is not None and abs(a[0] - b[0]) <= 1 and abs(a[1] - b[1]) <= 1
+
+    def _forward_pixel_is_surrounded(self, outputs, sx, sy):
+        center = outputs[sy][sx]
+        if center is None:
+            return False
+        neighbors = []
+        if sy > 0:
+            neighbors.append(outputs[sy - 1][sx])
+        if sx + 1 < self.width:
+            neighbors.append(outputs[sy][sx + 1])
+        if sy + 1 < self.height:
+            neighbors.append(outputs[sy + 1][sx])
+        if sx > 0:
+            neighbors.append(outputs[sy][sx - 1])
+        return bool(neighbors) and all(self._adjacent_or_overlapping(center, neighbor) for neighbor in neighbors)
+
     def _render_forward_mapped(self, source_pixels, progress_cb=None):
         accum = defaultdict(lambda: [0, 0, 0, 0, 0])
-        samples = self.transform_precision + 1
-        max_progress = float(self.width * self.height * samples * samples)
-        progress = 0.0
-        offsets = [(i + 0.5) / samples - 0.5 for i in range(samples)]
-        for sy in range(self.height):
-            imag_base = self.source_yt - (sy / self._source_sy)
-            for sx in range(self.width):
-                sidx = (sy * self.width + sx) * 4
-                px = source_pixels[sidx:sidx + 4]
-                for oy_off in offsets:
-                    z_imag = imag_base - (oy_off / self._source_sy)
-                    for ox_off in offsets:
-                        z = ((sx + ox_off) / self._source_sx + self.source_xl) + 1j * z_imag
-                        valid, w, *_rest = self._evaluate_point(z)
-                        if valid:
-                            ox, oy = self._domain_coord_to_pixel(w)
-                            if 0 <= ox < self.width and 0 <= oy < self.height:
-                                bucket = accum[(ox, oy)]
-                                bucket[0] += px[0]; bucket[1] += px[1]; bucket[2] += px[2]; bucket[3] += px[3]; bucket[4] += 1
+        center_outputs = self._forward_center_outputs(accum, source_pixels)
+        if self.transform_precision <= 0:
+            max_progress = float(max(1, self.height))
+            progress = 0.0
+        else:
+            samples = self.transform_precision + 1
+            offsets = [(i + 0.5) / samples - 0.5 for i in range(samples)]
+            offsets = [(ox, oy) for oy in offsets for ox in offsets if abs(ox) > 1e-12 or abs(oy) > 1e-12]
+            max_progress = float(max(1, self.width * self.height * max(1, len(offsets))))
+            progress = 0.0
+            for sy in range(self.height):
+                imag_base = self.source_yt - (sy / self._source_sy)
+                for sx in range(self.width):
+                    if self._forward_pixel_is_surrounded(center_outputs, sx, sy):
+                        progress += len(offsets)
+                        continue
+                    for ox_off, oy_off in offsets:
+                        z = ((sx + ox_off) / self._source_sx + self.source_xl) + 1j * (imag_base - (oy_off / self._source_sy))
+                        self._accumulate_forward_pixel(accum, source_pixels, sx, sy, z)
                         progress += 1.0
-                if progress_cb is not None and sx % 16 == 0:
-                    progress_cb(progress / max_progress)
+                    if progress_cb is not None and sx % 16 == 0:
+                        progress_cb(min(progress / max_progress, 1.0))
+
         mapped_data = bytearray(self.width * self.height * 4)
         for (ox, oy), bucket in accum.items():
             count = max(1, bucket[4])
@@ -813,7 +944,7 @@ def _show_dialog(procedure, config, width, height):
     )
 
     coord_expander = Gtk.Expander(label="Coordinate/Scale settings")
-    coord_expander.set_expanded(False)
+    coord_expander.set_expanded(bool(config.get_property("coordinate-settings-expanded")))
     coord_grid = Gtk.Grid(column_spacing=8, row_spacing=8, margin=8)
     coord_expander.add(coord_grid)
     grid.attach(coord_expander, 0, row, 5, 1)
@@ -1070,6 +1201,7 @@ def _show_dialog(procedure, config, width, height):
         analysis_check.set_active(True)
         checker_check.set_active(False)
         group_check.set_active(False)
+        coord_expander.set_expanded(False)
         _sync()
 
     last_used = {
@@ -1118,6 +1250,7 @@ def _show_dialog(procedure, config, width, height):
         analysis_check.set_active(bool(last_used["create-analysis-layers"]))
         checker_check.set_active(bool(last_used["checkerboard"]))
         group_check.set_active(bool(last_used["analysis-group"]))
+        coord_expander.set_expanded(False)
         _sync()
 
     dialog.show_all()
@@ -1154,6 +1287,7 @@ def _show_dialog(procedure, config, width, height):
         config.set_property("create-analysis-layers", bool(analysis_check.get_active()))
         config.set_property("checkerboard", bool(checker_check.get_active()))
         config.set_property("analysis-group", bool(group_check.get_active()))
+        config.set_property("coordinate-settings-expanded", bool(coord_expander.get_expanded()))
     dialog.destroy()
     return accepted
 
@@ -1229,6 +1363,15 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     img_cx = (width - 1) / 2.0
     img_cy = (height - 1) / 2.0
 
+    if not transform_layer and not create_analysis:
+        Gimp.message("Conformal Mapping: select Transform active layer and/or Add analysis layers to run.")
+        return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
+
+    source = drawables[0] if drawables else image.get_active_layer()
+    if transform_layer and source is None:
+        Gimp.message("Conformal Mapping: no active layer is available to transform.")
+        return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, GLib.Error())
+
     if coord_system == "pixels":
         center_x = ((center_x - img_cx) / max(selected_half_px, 1e-9)) * safe_scale
         center_y = ((img_cy - center_y) / max(selected_half_px, 1e-9)) * safe_scale
@@ -1297,8 +1440,11 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     except Exception as exc:
         Gimp.message(f"Conformal Mapping input error: {exc}")
         return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
-    source = drawables[0] if drawables else image.get_active_layer()
-    source_pixels = _drawable_pixels_rgba(source, width, height) if (transform_layer and source is not None) else None
+    try:
+        source_pixels = _drawable_pixels_rgba(source, width, height) if transform_layer else None
+    except Exception as exc:
+        Gimp.message(f"Conformal Mapping source layer error: {exc}")
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
 
     if run_mode == Gimp.RunMode.INTERACTIVE:
         Gimp.progress_init("Rendering conformal map…")
@@ -1308,17 +1454,26 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             source_pixels,
             progress_cb=(lambda value: Gimp.progress_update(value)) if (run_mode == Gimp.RunMode.INTERACTIVE and source_pixels is not None) else None,
         ) if source_pixels is not None else None
-        arg_pixels, mod_pixels, grid_pixels, _ = renderer_full.render(
-            source_pixels=None,
-            progress_cb=None,
-        )
+        if create_analysis:
+            arg_pixels, mod_pixels, grid_pixels, _ = renderer_full.render(
+                source_pixels=None,
+                progress_cb=None,
+            )
+        else:
+            arg_pixels = mod_pixels = grid_pixels = None
     except Exception as exc:
         Gimp.message(f"Conformal Mapping render error: {exc}")
         return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
 
     image.undo_group_start()
     # Gets active layer's name & appends space if name == Layer (default layer name in English)
-    layer_name = "" if source.get_name() == "Layer" else source.get_name() + " "
+    try:
+        source_name = source.get_name() if source is not None else ""
+    except Exception as exc:
+        image.undo_group_end()
+        Gimp.message(f"Conformal Mapping source layer error: {exc}")
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
+    layer_name = "" if source_name in ("", "Layer") else source_name + " "
     try:
         if transform_layer and mapped_pixels is not None:
             mapped_layer = Gimp.Layer.new(
@@ -1387,6 +1542,9 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         )
         parasite = Gimp.Parasite.new("gimp-comment", Gimp.PARASITE_PERSISTENT, comment.encode("utf-8"))
         image.attach_parasite(parasite)
+    except Exception as exc:
+        Gimp.message(f"Conformal Mapping layer write error: {exc}")
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
     finally:
         image.undo_group_end()
 
@@ -1497,6 +1655,7 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_boolean_argument("transform-active-layer", "_Transform active layer", "Transform pixels in the active layer directly", True, GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("create-analysis-layers", "Add _analysis layers", "Create argument/modulus/grid helper layers", True, GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("analysis-group", "_Group analysis layers (has visual bug)", "You may need to toggle the layers' visibility for them to appear correctly", False, GObject.ParamFlags.READWRITE)
+        procedure.add_boolean_argument("coordinate-settings-expanded", "Coordinate settings expanded", "Remember whether Coordinate/Scale settings were expanded in the dialog", False, GObject.ParamFlags.READWRITE)
 
         return procedure
 
