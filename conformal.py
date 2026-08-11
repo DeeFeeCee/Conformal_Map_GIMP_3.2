@@ -487,7 +487,7 @@ class ConformalRenderer:
         m = value % period
         return m if m < size else (period - 1) - m
 
-    def _evaluate_point(self, z):
+    def _evaluate_mapping(self, z):
         env = {"z": z, "zz": z * z, "w": 0j, "p": True}
         env.update(MATH_NAMESPACE)
         try:
@@ -509,6 +509,10 @@ class ConformalRenderer:
             valid = valid and not (math.isinf(w.real) or math.isinf(w.imag))
         except Exception:
             valid = False
+        return valid, w
+
+    def _evaluate_point(self, z):
+        valid, w = self._evaluate_mapping(z)
 
         if valid:
             try:
@@ -532,6 +536,10 @@ class ConformalRenderer:
         return True, w, arg_norm, mod, sqr, grid_line
 
     def _sample_mapped_pixel(self, source_pixels, sx, sy):
+        if 0 <= sx < self.width and 0 <= sy < self.height:
+            sidx = (sy * self.width + sx) * 4
+            return tuple(source_pixels[sidx:sidx + 4])
+
         if 0 <= sx < self.width:
             tile_x = 0
         elif sx < 0:
@@ -546,20 +554,21 @@ class ConformalRenderer:
         else:
             tile_y = ((sy - self.height) // self.height) + 1
 
-        if (tile_x + tile_y) > self.abyss_loop_iterations:
-            return (0, 0, 0, 0)
-
         if self.abyss_mode == "clamp":
             sx = min(max(0, sx), self.width - 1)
             sy = min(max(0, sy), self.height - 1)
             sidx = (sy * self.width + sx) * 4
             return tuple(source_pixels[sidx:sidx + 4])
         if self.abyss_mode == "loop":
+            if (tile_x + tile_y) > self.abyss_loop_iterations:
+                return (0, 0, 0, 0)
             sx %= self.width
             sy %= self.height
             sidx = (sy * self.width + sx) * 4
             return tuple(source_pixels[sidx:sidx + 4])
         if self.abyss_mode == "reflect":
+            if (tile_x + tile_y) > self.abyss_loop_iterations:
+                return (0, 0, 0, 0)
             sx = self._mirror_coord(sx, self.width)
             sy = self._mirror_coord(sy, self.height)
             sidx = (sy * self.width + sx) * 4
@@ -595,6 +604,38 @@ class ConformalRenderer:
         oy = int(round((self.domain_yt - w.imag) * self._domain_sy))
         return ox, oy
 
+    def _forward_output_bounds(self):
+        min_x = min_y = math.inf
+        max_x = max_y = -math.inf
+        for sy in range(self.height):
+            z_imag = self.source_yt - (sy / self._source_sy)
+            for sx in range(self.width):
+                z = (sx / self._source_sx + self.source_xl) + 1j * z_imag
+                valid, w = self._evaluate_mapping(z)
+                if not valid:
+                    continue
+                min_x = min(min_x, w.real)
+                max_x = max(max_x, w.real)
+                min_y = min(min_y, w.imag)
+                max_y = max(max_y, w.imag)
+
+        if not all(math.isfinite(value) for value in (min_x, max_x, min_y, max_y)):
+            return self.domain_xl, self.domain_xr, self.domain_yt, self.domain_yb
+
+        x_span = max(max_x - min_x, 1e-9)
+        y_span = max(max_y - min_y, 1e-9)
+        x_pad = x_span / max(self.width - 1, 1) * 0.5
+        y_pad = y_span / max(self.height - 1, 1) * 0.5
+        return min_x - x_pad, max_x + x_pad, max_y + y_pad, min_y - y_pad
+
+    def _forward_coord_to_pixel(self, w, bounds):
+        xl, xr, yt, yb = bounds
+        sx = (self.width - 1.0) / max(xr - xl, 1e-9)
+        sy = (self.height - 1.0) / max(yt - yb, 1e-9)
+        ox = int(round((w.real - xl) * sx))
+        oy = int(round((yt - w.imag) * sy))
+        return ox, oy
+
     def _render_inverse_mapped(self, source_pixels, progress_cb=None):
         mapped_data = bytearray(self.width * self.height * 4)
         max_progress = float(self.width * self.height)
@@ -623,6 +664,7 @@ class ConformalRenderer:
         max_progress = float(self.width * self.height * samples * samples)
         progress = 0.0
         offsets = [(i + 0.5) / samples - 0.5 for i in range(samples)]
+        forward_bounds = self._forward_output_bounds()
         for sy in range(self.height):
             imag_base = self.source_yt - (sy / self._source_sy)
             for sx in range(self.width):
@@ -632,9 +674,9 @@ class ConformalRenderer:
                     z_imag = imag_base - (oy_off / self._source_sy)
                     for ox_off in offsets:
                         z = ((sx + ox_off) / self._source_sx + self.source_xl) + 1j * z_imag
-                        valid, w, *_rest = self._evaluate_point(z)
+                        valid, w = self._evaluate_mapping(z)
                         if valid:
-                            ox, oy = self._domain_coord_to_pixel(w)
+                            ox, oy = self._forward_coord_to_pixel(w, forward_bounds)
                             if 0 <= ox < self.width and 0 <= oy < self.height:
                                 bucket = accum[(ox, oy)]
                                 bucket[0] += px[0]; bucket[1] += px[1]; bucket[2] += px[2]; bucket[3] += px[3]; bucket[4] += 1
@@ -709,11 +751,7 @@ class ConformalRenderer:
                     if source_pixels is not None:
                         # Convert evaluated w through the unzoomed source/image viewport.
                         sx, sy = self._source_coord_to_pixel(w)
-                        if 0 <= sx < self.width and 0 <= sy < self.height:
-                            sidx = (sy * self.width + sx) * 4
-                            mapped_px = tuple(source_pixels[sidx:sidx + 4])
-                        else:
-                            mapped_px = self._sample_mapped_pixel(source_pixels, sx, sy)
+                        mapped_px = self._sample_mapped_pixel(source_pixels, sx, sy)
 
                 idx = base + (col * 4)
                 arg_data[idx:idx + 4] = bytes(arg_px)
@@ -1347,12 +1385,11 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     try:
         inverse_code = ConformalRenderer.symbolic_inverse_code(code)
     except Exception as exc:
+        inverse_code = None
         if symbolic_expression:
-            Gimp.message(f"Conformal Mapping inverse error: {exc}")
-            return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
+            Gimp.message(f"Conformal Mapping inverse warning: {exc}; using forward splatting for the transform.")
     if symbolic_expression and inverse_code is None:
-        Gimp.message("Conformal Mapping inverse error: SymPy could not solve this expression; use Python code for forward mapping.")
-        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error("SymPy could not solve this expression"))
+        Gimp.message("Conformal Mapping inverse warning: SymPy could not solve this expression; using forward splatting for the transform.")
 
     print(f"Conformal Mapping interpreted function: {ConformalRenderer._normalize_code(code)}", flush=True)
     print(f"Conformal Mapping interpreted inverse: {inverse_code or 'none'}", flush=True)
