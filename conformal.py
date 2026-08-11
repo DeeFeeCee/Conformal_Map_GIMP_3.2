@@ -228,7 +228,7 @@ class ConformalRenderer:
         self.checkerboard = bool(checkerboard)
         self.gradient = gradient or "HSV"
         self.abyss_mode = (abyss_mode or "transparent").strip().lower()
-        self.abyss_loop_iterations = max(0, int(abyss_loop_iterations))
+        self.abyss_loop_iterations = max(1, int(abyss_loop_iterations))
         self.log_base = str(log_base or "2")
         self.inverse_code = inverse_code
         self.transform_precision = max(0, min(100, int(transform_precision)))
@@ -689,7 +689,7 @@ class ConformalRenderer:
                 progress_cb(progress / max_progress)
 
         # Paint the actual transformed image over the abyss fill, so abyss pixels
-        # cannot cover source pixels even when wrap iterations are zero.
+        # cannot cover source pixels even when tile iterations are zero.
         forward_mapped = self._render_forward_mapped(source_pixels)
         for idx in range(0, len(mapped_data), 4):
             if forward_mapped[idx + 3] > 0:
@@ -1110,8 +1110,8 @@ def _show_dialog(procedure, config, width, height):
 
     abyss_combo = Gtk.ComboBoxText()
     for key, label in [
-        ("loop", "Loop"),
-        ("reflect", "Reflect"),
+        ("loop", "Loop tiling"),
+        ("reflect", "Reflect tiling"),
         ("clamp", "Clamp"),
         ("transparent", "Transparent"),
         ("foreground", "Foreground color"),
@@ -1125,7 +1125,7 @@ def _show_dialog(procedure, config, width, height):
     abyss_combo.set_active_id(abyss_value)
     abyss_label = Gtk.Label(label="Abyss mode", xalign=0.0)
     abyss_spin = Gtk.SpinButton()
-    abyss_spin.set_adjustment(Gtk.Adjustment(value=float(config.get_property("abyss-loop-iterations")), lower=0.0, upper=1024.0, step_increment=1.0, page_increment=10.0, page_size=0.0))
+    abyss_spin.set_adjustment(Gtk.Adjustment(value=float(config.get_property("abyss-loop-iterations")), lower=1.0, upper=1024.0, step_increment=1.0, page_increment=10.0, page_size=0.0))
 
     transform_check = Gtk.CheckButton(label="Transform active layer")
     transform_check.set_active(bool(config.get_property("transform-active-layer")))
@@ -1137,9 +1137,9 @@ def _show_dialog(procedure, config, width, height):
     abyss_combo.set_tooltip_text("Choose outside-image sampling behavior.")
     grid.attach(abyss_combo, 1, row, 1, 1)
 
-    wrap_label = Gtk.Label(label="Wrap iterations", xalign=0.0)
-    wrap_label.set_tooltip_text("Maximum number of adjacent out-of-bounds wrap tiles to sample.")
-    grid.attach(wrap_label, 2, row, 1, 1)
+    tile_label = Gtk.Label(label="Tile iterations", xalign=0.0)
+    tile_label.set_tooltip_text("Maximum number of adjacent out-of-bounds wrap tiles to sample.")
+    grid.attach(tile_label, 2, row, 1, 1)
     abyss_spin.set_tooltip_text("Effective for Loop and Reflect modes.")
     grid.attach(abyss_spin, 3, row, 1, 1)
     row += 1
@@ -1229,7 +1229,7 @@ def _show_dialog(procedure, config, width, height):
         custom_palette = gradient_combo.get_active_id() == "custom"
         abyss_label.set_sensitive(transform_check.get_active())
         abyss_combo.set_sensitive(transform_check.get_active())
-        wrap_label.set_sensitive(transform_check.get_active())
+        tile_label.set_sensitive(transform_check.get_active())
         abyss_spin.set_sensitive(transform_check.get_active())
         group_check.set_sensitive(analysis_enabled)
         checker_check.set_sensitive(analysis_enabled)
@@ -1719,9 +1719,9 @@ class ConformalPlugin(Gimp.PlugIn):
         )
         procedure.add_int_argument(
             "abyss-loop-iterations",
-            "_Wrap iterations",
-            "Maximum wrap iterations in loop abyss mode",
-            0,
+            "_Tile iterations",
+            "Maximum tile iterations in loop abyss mode",
+            1,
             1024,
             2,
             GObject.ParamFlags.READWRITE,
