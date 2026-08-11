@@ -531,20 +531,21 @@ class ConformalRenderer:
         else:
             tile_y = ((sy - self.height) // self.height) + 1
 
-        if (tile_x + tile_y) > self.abyss_loop_iterations:
-            return (0, 0, 0, 0)
-
         if self.abyss_mode == "clamp":
             sx = min(max(0, sx), self.width - 1)
             sy = min(max(0, sy), self.height - 1)
             sidx = (sy * self.width + sx) * 4
             return tuple(source_pixels[sidx:sidx + 4])
         if self.abyss_mode == "loop":
+            if (tile_x + tile_y) > self.abyss_loop_iterations:
+                return (0, 0, 0, 0)
             sx %= self.width
             sy %= self.height
             sidx = (sy * self.width + sx) * 4
             return tuple(source_pixels[sidx:sidx + 4])
         if self.abyss_mode == "reflect":
+            if (tile_x + tile_y) > self.abyss_loop_iterations:
+                return (0, 0, 0, 0)
             sx = self._mirror_coord(sx, self.width)
             sy = self._mirror_coord(sy, self.height)
             sidx = (sy * self.width + sx) * 4
@@ -649,7 +650,7 @@ class ConformalRenderer:
                     z_imag = imag_base - (oy_off / self._source_sy)
                     for ox_off in offsets:
                         z = ((sx + ox_off) / self._source_sx + self.source_xl) + 1j * z_imag
-                        valid, w, *_rest = self._evaluate_point(z)
+                        valid, w = self._evaluate_mapping(z)
                         if valid:
                             ox, oy = self._forward_coord_to_pixel(w, forward_bounds)
                             if 0 <= ox < self.width and 0 <= oy < self.height:
@@ -1360,12 +1361,11 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     try:
         inverse_code = ConformalRenderer.symbolic_inverse_code(code)
     except Exception as exc:
+        inverse_code = None
         if symbolic_expression:
-            Gimp.message(f"Conformal Mapping inverse error: {exc}")
-            return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
+            Gimp.message(f"Conformal Mapping inverse warning: {exc}; using forward splatting for the transform.")
     if symbolic_expression and inverse_code is None:
-        Gimp.message("Conformal Mapping inverse error: SymPy could not solve this expression; use Python code for forward mapping.")
-        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error("SymPy could not solve this expression"))
+        Gimp.message("Conformal Mapping inverse warning: SymPy could not solve this expression; using forward splatting for the transform.")
 
     print(f"Conformal Mapping interpreted function: {ConformalRenderer._normalize_code(code)}", flush=True)
     print(f"Conformal Mapping interpreted inverse: {inverse_code or 'none'}", flush=True)
