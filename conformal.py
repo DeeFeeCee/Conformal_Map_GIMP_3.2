@@ -929,7 +929,7 @@ def _show_dialog(procedure, config, width, height):
     )
 
     coord_expander = Gtk.Expander(label="Coordinate/Scale settings")
-    coord_expander.set_expanded(False)
+    coord_expander.set_expanded(bool(config.get_property("coordinate-settings-expanded")))
     coord_grid = Gtk.Grid(column_spacing=8, row_spacing=8, margin=8)
     coord_expander.add(coord_grid)
     grid.attach(coord_expander, 0, row, 5, 1)
@@ -1186,6 +1186,7 @@ def _show_dialog(procedure, config, width, height):
         analysis_check.set_active(True)
         checker_check.set_active(False)
         group_check.set_active(False)
+        coord_expander.set_expanded(False)
         _sync()
 
     last_used = {
@@ -1234,6 +1235,7 @@ def _show_dialog(procedure, config, width, height):
         analysis_check.set_active(bool(last_used["create-analysis-layers"]))
         checker_check.set_active(bool(last_used["checkerboard"]))
         group_check.set_active(bool(last_used["analysis-group"]))
+        coord_expander.set_expanded(False)
         _sync()
 
     dialog.show_all()
@@ -1270,6 +1272,7 @@ def _show_dialog(procedure, config, width, height):
         config.set_property("create-analysis-layers", bool(analysis_check.get_active()))
         config.set_property("checkerboard", bool(checker_check.get_active()))
         config.set_property("analysis-group", bool(group_check.get_active()))
+        config.set_property("coordinate-settings-expanded", bool(coord_expander.get_expanded()))
     dialog.destroy()
     return accepted
 
@@ -1636,6 +1639,7 @@ class ConformalPlugin(Gimp.PlugIn):
         procedure.add_boolean_argument("transform-active-layer", "_Transform active layer", "Transform pixels in the active layer directly", True, GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("create-analysis-layers", "Add _analysis layers", "Create argument/modulus/grid helper layers", True, GObject.ParamFlags.READWRITE)
         procedure.add_boolean_argument("analysis-group", "_Group analysis layers (has visual bug)", "You may need to toggle the layers' visibility for them to appear correctly", False, GObject.ParamFlags.READWRITE)
+        procedure.add_boolean_argument("coordinate-settings-expanded", "Coordinate settings expanded", "Remember whether Coordinate/Scale settings were expanded in the dialog", False, GObject.ParamFlags.READWRITE)
 
         return procedure
 
