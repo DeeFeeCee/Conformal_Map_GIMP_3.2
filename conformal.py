@@ -536,9 +536,8 @@ class ConformalRenderer:
         return True, w, arg_norm, mod, sqr, grid_line
 
     def _sample_mapped_pixel(self, source_pixels, sx, sy):
-        if 0 <= sx < self.width and 0 <= sy < self.height:
-            sidx = (sy * self.width + sx) * 4
-            return tuple(source_pixels[sidx:sidx + 4])
+        if sx is None or sy is None:
+            return (0, 0, 0, 0)
 
         if 0 <= sx < self.width:
             tile_x = 0
@@ -594,14 +593,22 @@ class ConformalRenderer:
             return False, 0j
         return valid, z
 
+    def _safe_round_to_int(self, value):
+        try:
+            if not math.isfinite(value):
+                return None
+            return int(round(value))
+        except Exception:
+            return None
+
     def _source_coord_to_pixel(self, z):
-        sx = int(round((z.real - self.source_xl) * self._source_sx))
-        sy = int(round((self.source_yt - z.imag) * self._source_sy))
+        sx = self._safe_round_to_int((z.real - self.source_xl) * self._source_sx)
+        sy = self._safe_round_to_int((self.source_yt - z.imag) * self._source_sy)
         return sx, sy
 
     def _domain_coord_to_pixel(self, w):
-        ox = int(round((w.real - self.domain_xl) * self._domain_sx))
-        oy = int(round((self.domain_yt - w.imag) * self._domain_sy))
+        ox = self._safe_round_to_int((w.real - self.domain_xl) * self._domain_sx)
+        oy = self._safe_round_to_int((self.domain_yt - w.imag) * self._domain_sy)
         return ox, oy
 
     def _forward_output_bounds(self):
@@ -658,33 +665,72 @@ class ConformalRenderer:
                 progress_cb(progress / max_progress)
         return bytes(mapped_data)
 
+    def _accumulate_forward_pixel(self, accum, source_pixels, sx, sy, z):
+        valid, w, *_rest = self._evaluate_point(z)
+        if not valid:
+            return None
+        ox, oy = self._source_coord_to_pixel(w)
+        if ox is None or oy is None or not (0 <= ox < self.width and 0 <= oy < self.height):
+            return None
+        sidx = (sy * self.width + sx) * 4
+        px = source_pixels[sidx:sidx + 4]
+        bucket = accum[(ox, oy)]
+        bucket[0] += px[0]; bucket[1] += px[1]; bucket[2] += px[2]; bucket[3] += px[3]; bucket[4] += 1
+        return ox, oy
+
+    def _forward_center_outputs(self, accum, source_pixels):
+        outputs = [[None for _x in range(self.width)] for _y in range(self.height)]
+        for sy in range(self.height):
+            imag = self.source_yt - (sy / self._source_sy)
+            for sx in range(self.width):
+                z = (sx / self._source_sx + self.source_xl) + 1j * imag
+                outputs[sy][sx] = self._accumulate_forward_pixel(accum, source_pixels, sx, sy, z)
+        return outputs
+
+    @staticmethod
+    def _adjacent_or_overlapping(a, b):
+        return a is not None and b is not None and abs(a[0] - b[0]) <= 1 and abs(a[1] - b[1]) <= 1
+
+    def _forward_pixel_is_surrounded(self, outputs, sx, sy):
+        center = outputs[sy][sx]
+        if center is None:
+            return False
+        neighbors = []
+        if sy > 0:
+            neighbors.append(outputs[sy - 1][sx])
+        if sx + 1 < self.width:
+            neighbors.append(outputs[sy][sx + 1])
+        if sy + 1 < self.height:
+            neighbors.append(outputs[sy + 1][sx])
+        if sx > 0:
+            neighbors.append(outputs[sy][sx - 1])
+        return bool(neighbors) and all(self._adjacent_or_overlapping(center, neighbor) for neighbor in neighbors)
+
     def _render_forward_mapped(self, source_pixels, progress_cb=None):
         accum = defaultdict(lambda: [0, 0, 0, 0, 0])
-        samples = self.transform_precision + 1
-        max_progress = float(self.width * self.height * samples * samples)
-        progress = 0.0
-        offsets = [(i + 0.5) / samples - 0.5 for i in range(samples)]
-        forward_bounds = self._forward_output_bounds()
-        for sy in range(self.height):
-            imag_base = self.source_yt - (sy / self._source_sy)
-            for sx in range(self.width):
-                sidx = (sy * self.width + sx) * 4
-                px = source_pixels[sidx:sidx + 4]
-                for oy_off in offsets:
-                    z_imag = imag_base - (oy_off / self._source_sy)
-                    for ox_off in offsets:
-                        z = ((sx + ox_off) / self._source_sx + self.source_xl) + 1j * z_imag
-                        valid, w = self._evaluate_mapping(z)
-                        if valid:
-                            # Forward splats stay in the source coordinate viewport so
-                            # output zoom/center settings do not normalize them to the canvas.
-                            ox, oy = self._source_coord_to_pixel(w)
-                            if 0 <= ox < self.width and 0 <= oy < self.height:
-                                bucket = accum[(ox, oy)]
-                                bucket[0] += px[0]; bucket[1] += px[1]; bucket[2] += px[2]; bucket[3] += px[3]; bucket[4] += 1
+        center_outputs = self._forward_center_outputs(accum, source_pixels)
+        if self.transform_precision <= 0:
+            max_progress = float(max(1, self.height))
+            progress = 0.0
+        else:
+            samples = self.transform_precision + 1
+            offsets = [(i + 0.5) / samples - 0.5 for i in range(samples)]
+            offsets = [(ox, oy) for oy in offsets for ox in offsets if abs(ox) > 1e-12 or abs(oy) > 1e-12]
+            max_progress = float(max(1, self.width * self.height * max(1, len(offsets))))
+            progress = 0.0
+            for sy in range(self.height):
+                imag_base = self.source_yt - (sy / self._source_sy)
+                for sx in range(self.width):
+                    if self._forward_pixel_is_surrounded(center_outputs, sx, sy):
+                        progress += len(offsets)
+                        continue
+                    for ox_off, oy_off in offsets:
+                        z = ((sx + ox_off) / self._source_sx + self.source_xl) + 1j * (imag_base - (oy_off / self._source_sy))
+                        self._accumulate_forward_pixel(accum, source_pixels, sx, sy, z)
                         progress += 1.0
-                if progress_cb is not None and sx % 16 == 0:
-                    progress_cb(progress / max_progress)
+                    if progress_cb is not None and sx % 16 == 0:
+                        progress_cb(min(progress / max_progress, 1.0))
+
         mapped_data = bytearray(self.width * self.height * 4)
         for (ox, oy), bucket in accum.items():
             count = max(1, bucket[4])
