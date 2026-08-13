@@ -603,7 +603,7 @@ class ConformalRenderer:
             return False, 0j, 0.0, 0.0, 0, False
         return True, w, arg_norm, mod, sqr, grid_line
 
-    def _sample_mapped_pixel(self, source_pixels, sx, sy):
+    def _sample_mapped_pixel(self, source_pixels, sx, sy, use_abyss=True):
         if sx is None or sy is None:
             return (0, 0, 0, 0)
 
@@ -620,6 +620,12 @@ class ConformalRenderer:
             tile_y = ((-sy - 1) // self.height) + 1
         else:
             tile_y = ((sy - self.height) // self.height) + 1
+
+        if not use_abyss:
+            if tile_x == 0 and tile_y == 0:
+                sidx = (sy * self.width + sx) * 4
+                return tuple(source_pixels[sidx:sidx + 4])
+            return (0, 0, 0, 0)
 
         if self.abyss_mode == "clamp":
             sx = min(max(0, sx), self.width - 1)
@@ -713,8 +719,12 @@ class ConformalRenderer:
         oy = int(round((yt - w.imag) * sy))
         return ox, oy
 
+    def _pixel_in_source_bounds(self, sx, sy):
+        return sx is not None and sy is not None and 0 <= sx < self.width and 0 <= sy < self.height
+
     def _render_inverse_mapped(self, source_pixels, progress_cb=None):
         mapped_data = bytearray(self.width * self.height * 4)
+        forward_mapped = self._render_forward_mapped(source_pixels) if self.abyss_mode != "transparent" else None
         max_progress = float(self.width * self.height)
         progress = 0.0
         for row in range(self.height):
@@ -723,12 +733,20 @@ class ConformalRenderer:
             for col in range(self.width):
                 w = col / self._domain_sx + self.domain_xl + 1j * imag
                 valid, z = self._evaluate_inverse_point(w)
+                idx = base + (col * 4)
+                forward_px = None
+                if forward_mapped is not None:
+                    forward_px = tuple(forward_mapped[idx:idx + 4])
+
                 if valid:
                     sx, sy = self._source_coord_to_pixel(z)
                     mapped_px = self._sample_mapped_pixel(source_pixels, sx, sy)
+                    if not self._pixel_in_source_bounds(sx, sy) and forward_px is not None and forward_px[3] > 0:
+                        mapped_px = forward_px
+                elif forward_px is not None and forward_px[3] > 0:
+                    mapped_px = forward_px
                 else:
                     mapped_px = (0, 0, 0, 0)
-                idx = base + (col * 4)
                 mapped_data[idx:idx + 4] = bytes(mapped_px)
                 progress += 1.0
             if progress_cb is not None:
@@ -1174,8 +1192,8 @@ def _show_dialog(procedure, config, width, height):
 
     abyss_combo = Gtk.ComboBoxText()
     for key, label in [
-        ("loop", "Loop"),
-        ("reflect", "Reflect"),
+        ("loop", "Loop tiling"),
+        ("reflect", "Reflect tiling"),
         ("clamp", "Clamp"),
         ("transparent", "Transparent"),
         ("foreground", "Foreground color"),
@@ -1203,9 +1221,9 @@ def _show_dialog(procedure, config, width, height):
     abyss_combo.set_tooltip_text("Choose outside-image sampling behavior.")
     grid.attach(abyss_combo, 1, row, 1, 1)
 
-    wrap_label = Gtk.Label(label="Wrap iterations", xalign=0.0)
-    wrap_label.set_tooltip_text("Maximum number of adjacent out-of-bounds wrap tiles to sample.")
-    grid.attach(wrap_label, 2, row, 1, 1)
+    tile_label = Gtk.Label(label="Tile iterations", xalign=0.0)
+    tile_label.set_tooltip_text("Maximum number of adjacent out-of-bounds wrap tiles to sample.")
+    grid.attach(tile_label, 2, row, 1, 1)
     abyss_spin.set_tooltip_text("Effective for Loop and Reflect modes.")
     grid.attach(abyss_spin, 3, row, 1, 1)
     row += 1
@@ -1295,7 +1313,7 @@ def _show_dialog(procedure, config, width, height):
         custom_palette = gradient_combo.get_active_id() == "custom"
         abyss_label.set_sensitive(transform_check.get_active())
         abyss_combo.set_sensitive(transform_check.get_active())
-        wrap_label.set_sensitive(transform_check.get_active())
+        tile_label.set_sensitive(transform_check.get_active())
         abyss_spin.set_sensitive(transform_check.get_active())
         group_check.set_sensitive(analysis_enabled)
         checker_check.set_sensitive(analysis_enabled)
@@ -1818,9 +1836,9 @@ class ConformalPlugin(Gimp.PlugIn):
         )
         procedure.add_int_argument(
             "abyss-loop-iterations",
-            "_Wrap iterations",
-            "Maximum wrap iterations in loop abyss mode",
-            0,
+            "_Tile iterations",
+            "Maximum tile iterations in loop abyss mode",
+            1,
             1024,
             2,
             GObject.ParamFlags.READWRITE,
