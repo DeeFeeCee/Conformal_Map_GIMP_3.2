@@ -145,6 +145,33 @@ def _complex_acot(z):
     return cmath.atan(1 / z)
 
 
+def _real_value(x):
+    return x.real if isinstance(x, complex) else x
+
+
+def _math_floor(x):
+    return math.floor(_real_value(x))
+
+
+def _math_ceil(x):
+    return math.ceil(_real_value(x))
+
+
+def _math_round(x):
+    return round(_real_value(x))
+
+
+def _math_mod(x, y):
+    return x % y
+
+
+def _math_sign(x):
+    if isinstance(x, complex):
+        magnitude = abs(x)
+        return 0 if magnitude == 0 else x / magnitude
+    return 0 if x == 0 else (1 if x > 0 else -1)
+
+
 # expose math functions to user equations in a controlled namespace
 MATH_NAMESPACE = {
     "math": math,
@@ -154,6 +181,8 @@ MATH_NAMESPACE = {
     "min": min,
     "max": max,
     "pow": pow,
+    "range": range,
+    "phi": (1.0 + math.sqrt(5.0)) / 2.0,
 }
 for _name in dir(math):
     if not _name.startswith("_"):
@@ -162,6 +191,11 @@ for _name in dir(cmath):
     if not _name.startswith("_"):
         MATH_NAMESPACE[_name] = getattr(cmath, _name)
 MATH_NAMESPACE.update({
+    "ceil": _math_ceil,
+    "floor": _math_floor,
+    "round": _math_round,
+    "mod": _math_mod,
+    "sign": _math_sign,
     "csc": _complex_csc,
     "sec": _complex_sec,
     "cot": _complex_cot,
@@ -228,7 +262,7 @@ class ConformalRenderer:
         self.checkerboard = bool(checkerboard)
         self.gradient = gradient or "HSV"
         self.abyss_mode = (abyss_mode or "transparent").strip().lower()
-        self.abyss_loop_iterations = max(1, int(abyss_loop_iterations))
+        self.abyss_loop_iterations = max(0, abyss_loop_iterations)
         self.log_base = str(log_base or "2")
         self.inverse_code = inverse_code
         self.transform_precision = max(0, min(100, int(transform_precision)))
@@ -273,9 +307,22 @@ class ConformalRenderer:
             ast.Yield,
             ast.YieldFrom,
         )
+        assigned_names = set()
         for node in ast.walk(tree):
             if isinstance(node, blocked):
                 raise ValueError(f"Unsupported code construct: {type(node).__name__}")
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Param)):
+                assigned_names.add(node.id)
+        allowed_names = set(MATH_NAMESPACE) | {"z", "zz", "w", "p"} | assigned_names
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in allowed_names:
+                raise ValueError(f"Unsupported symbol: {node.id}")
+            if isinstance(node, ast.Attribute):
+                if not isinstance(node.value, ast.Name) or node.value.id not in {"math", "cmath"}:
+                    raise ValueError(f"Unsupported attribute access: {ast.unparse(node)}")
+                module = math if node.value.id == "math" else cmath
+                if not hasattr(module, node.attr) or node.attr.startswith("_"):
+                    raise ValueError(f"Unsupported function: {ast.unparse(node)}")
 
     @staticmethod
     def _sympy_expression_to_python(expression):
@@ -285,13 +332,30 @@ class ConformalRenderer:
 
         transformations = standard_transformations + (implicit_multiplication_application, convert_xor)
         z, w = sp.symbols("z w")
-        local_dict = {"z": z, "w": w, "i": sp.I, "I": sp.I}
+        def _sympy_abs(x):
+            return sp.sqrt(x ** 2)
+
+        def _sympy_max(x, y):
+            return (x + y + _sympy_abs(x - y)) / 2
+
+        def _sympy_min(x, y):
+            return (x + y - _sympy_abs(x - y)) / 2
+
+        local_dict = {"z": z, "w": w, "i": sp.I, "I": sp.I, "phi": sp.GoldenRatio}
+        for _name in ("sin", "cos", "tan", "csc", "sec", "cot", "sinh", "cosh", "tanh", "sqrt", "log", "exp", "sign", "floor", "ceiling"):
+            if hasattr(sp, _name):
+                local_dict[_name] = getattr(sp, _name)
+        local_dict.update({"abs": _sympy_abs, "Abs": _sympy_abs, "max": _sympy_max, "min": _sympy_min, "ceil": sp.ceiling, "round": sp.floor, "mod": sp.Mod})
         for _arc_name in ("sin", "cos", "tan", "csc", "sec", "cot", "sinh", "cosh", "tanh"):
             _inverse_name = f"a{_arc_name}"
             if hasattr(sp, _inverse_name):
                 local_dict[f"arc{_arc_name}"] = getattr(sp, _inverse_name)
         expr = parse_expr(expression, local_dict=local_dict, transformations=transformations, evaluate=False)
-        return sp.sstr(expr).replace("I", "1j")
+        unknown_symbols = expr.free_symbols - {z, w}
+        if unknown_symbols:
+            names = ", ".join(sorted(str(symbol) for symbol in unknown_symbols))
+            raise ValueError(f"Unsupported symbol(s): {names}")
+        return sp.sstr(expr).replace("I", "1j").replace("GoldenRatio", "phi")
 
     @staticmethod
     def _normalize_code(code):
@@ -686,14 +750,24 @@ class ConformalRenderer:
                 mapped_data[idx:idx + 4] = bytes(mapped_px)
                 progress += 1.0
             if progress_cb is not None:
-                progress_cb(progress / max_progress)
+                progress_cb((progress / max_progress) * 0.5)
 
         # Paint the actual transformed image over the abyss fill, so abyss pixels
-        # cannot cover source pixels even when tile iterations are zero.
-        forward_mapped = self._render_forward_mapped(source_pixels)
+        # cannot cover source pixels even when wrap iterations are zero.
+        forward_mapped = self._render_forward_mapped(
+            source_pixels,
+            (lambda value: progress_cb(0.5 + value * 0.45)) if progress_cb is not None else None,
+        )
+        overlay_progress = 0.0
+        overlay_max = float(max(1, len(mapped_data) // 4))
         for idx in range(0, len(mapped_data), 4):
             if forward_mapped[idx + 3] > 0:
                 mapped_data[idx:idx + 4] = forward_mapped[idx:idx + 4]
+            overlay_progress += 1.0
+            if progress_cb is not None and idx % (self.width * 64) == 0:
+                progress_cb(0.95 + (overlay_progress / overlay_max) * 0.05)
+        if progress_cb is not None:
+            progress_cb(1.0)
         return bytes(mapped_data)
 
     def _accumulate_forward_pixel(self, accum, source_pixels, sx, sy, z):
@@ -709,13 +783,15 @@ class ConformalRenderer:
         bucket[0] += px[0]; bucket[1] += px[1]; bucket[2] += px[2]; bucket[3] += px[3]; bucket[4] += 1
         return ox, oy
 
-    def _forward_center_outputs(self, accum, source_pixels):
+    def _forward_center_outputs(self, accum, source_pixels, progress_cb=None):
         outputs = [[None for _x in range(self.width)] for _y in range(self.height)]
         for sy in range(self.height):
             imag = self.source_yt - (sy / self._source_sy)
             for sx in range(self.width):
                 z = (sx / self._source_sx + self.source_xl) + 1j * imag
                 outputs[sy][sx] = self._accumulate_forward_pixel(accum, source_pixels, sx, sy, z)
+            if progress_cb is not None:
+                progress_cb((sy + 1) / float(max(1, self.height)))
         return outputs
 
     @staticmethod
@@ -739,9 +815,13 @@ class ConformalRenderer:
 
     def _render_forward_mapped(self, source_pixels, progress_cb=None):
         accum = defaultdict(lambda: [0, 0, 0, 0, 0])
-        center_outputs = self._forward_center_outputs(accum, source_pixels)
+        center_progress_scale = 1.0 if self.transform_precision <= 0 else 0.5
+        center_outputs = self._forward_center_outputs(
+            accum,
+            source_pixels,
+            (lambda value: progress_cb(value * center_progress_scale)) if progress_cb is not None else None,
+        )
         if self.transform_precision <= 0:
-            max_progress = float(max(1, self.height))
             progress = 0.0
         else:
             samples = self.transform_precision + 1
@@ -760,13 +840,15 @@ class ConformalRenderer:
                         self._accumulate_forward_pixel(accum, source_pixels, sx, sy, z)
                         progress += 1.0
                     if progress_cb is not None and sx % 16 == 0:
-                        progress_cb(min(progress / max_progress, 1.0))
+                        progress_cb(0.5 + min(progress / max_progress, 1.0) * 0.5)
 
         mapped_data = bytearray(self.width * self.height * 4)
         for (ox, oy), bucket in accum.items():
             count = max(1, bucket[4])
             idx = (oy * self.width + ox) * 4
             mapped_data[idx:idx + 4] = bytes((bucket[0] // count, bucket[1] // count, bucket[2] // count, bucket[3] // count))
+        if progress_cb is not None:
+            progress_cb(1.0)
         return bytes(mapped_data)
 
     def render_mapped(self, source_pixels, progress_cb=None):
@@ -1062,7 +1144,7 @@ def _show_dialog(procedure, config, width, height):
     _make_coord_scale("scale", "Input scale", 1.0e-5, 1.0e3, config.get_property("scale"), 0.01, 0.1, digits=5, tooltip="Coordinate assigned to opposite sides of input image (half of short/long side). Applied before zoom.")
     _make_coord_scale("center-x", "Input center X", -1.0e3, 1.0e3, config.get_property("center-x"), 0.01, 0.1, digits=5, tooltip="Input center X coordinate used for sampling the source image.")
     _make_coord_scale("center-y", "Input center Y", -1.0e3, 1.0e3, config.get_property("center-y"), 0.01, 0.1, digits=5, tooltip="Input center Y coordinate used for sampling the source image.")
-    _make_coord_scale("zoom", "Output zoom", 1.0e-5, 1.0e3, config.get_property("zoom"), 0.01, 0.1, digits=5, tooltip="Zoom factor. Higher values zoom in.")
+    _make_coord_scale("zoom", "Output zoom", 1.0e-5, 1.0e3, config.get_property("zoom"), 0.01, 0.1, digits=5, tooltip="Zoom factor: Higher values zoom in. Based on input scale.")
     _make_coord_scale("output-center-x", "Output center X", -1.0e3, 1.0e3, config.get_property("output-center-x"), 0.01, 0.1, digits=5, tooltip="Output center X coordinate for the rendered image viewport.")
     _make_coord_scale("output-center-y", "Output center Y", -1.0e3, 1.0e3, config.get_property("output-center-y"), 0.01, 0.1, digits=5, tooltip="Output center Y coordinate for the rendered image viewport.")
     def _convert_units(_widget):
@@ -1125,7 +1207,9 @@ def _show_dialog(procedure, config, width, height):
     abyss_combo.set_active_id(abyss_value)
     abyss_label = Gtk.Label(label="Abyss mode", xalign=0.0)
     abyss_spin = Gtk.SpinButton()
-    abyss_spin.set_adjustment(Gtk.Adjustment(value=float(config.get_property("abyss-loop-iterations")), lower=1.0, upper=1024.0, step_increment=1.0, page_increment=10.0, page_size=0.0))
+    abyss_spin.set_adjustment(Gtk.Adjustment(value=config.get_property("abyss-loop-iterations"), lower=0.0, upper=1024.0, step_increment=1.0, page_increment=10.0, page_size=0.0))
+    abyss_spin.set_digits(0)
+    abyss_spin.set_numeric(True)
 
     transform_check = Gtk.CheckButton(label="Transform active layer")
     transform_check.set_active(bool(config.get_property("transform-active-layer")))
@@ -1293,7 +1377,7 @@ def _show_dialog(procedure, config, width, height):
         "gradient-preset": gradient_combo.get_active_id() or "HSV",
         "gradient-custom": gradient_entry.get_text(),
         "abyss-mode": abyss_combo.get_active_id() or "transparent",
-        "abyss-loop-iterations": int(abyss_spin.get_value_as_int()),
+        "abyss-loop-iterations": abyss_spin.get_value(),
         "log-base": log_combo.get_active_id() or "2",
         "transform-active-layer": transform_check.get_active(),
         "create-analysis-layers": analysis_check.get_active(),
@@ -1354,7 +1438,7 @@ def _show_dialog(procedure, config, width, height):
         config.set_property("gradient-preset", gradient_combo.get_active_id() or "HSV")
         config.set_property("gradient-custom", gradient_entry.get_text().strip())
         config.set_property("abyss-mode", abyss_combo.get_active_id() or "transparent")
-        config.set_property("abyss-loop-iterations", int(abyss_spin.get_value_as_int()))
+        config.set_property("abyss-loop-iterations", abyss_spin.get_value())
         config.set_property("log-base", log_combo.get_active_id() or "2")
         config.set_property("transform-active-layer", bool(transform_check.get_active()))
         config.set_property("create-analysis-layers", bool(analysis_check.get_active()))
@@ -1471,18 +1555,33 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     domain_yt = output_center_y + domain_y_half_span
     domain_yb = output_center_y - domain_y_half_span
 
+    if run_mode == Gimp.RunMode.INTERACTIVE:
+        Gimp.progress_init("Evaluating inverse function…")
+        Gimp.progress_update(0.0)
+
+    try:
+        normalized_code = ConformalRenderer._normalize_code(code)
+    except Exception as exc:
+        Gimp.message(f"Conformal Mapping syntax error: {exc}")
+        return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
+
     inverse_code = None
     symbolic_expression = ConformalRenderer._strip_w_assignment(code) is not None
-    try:
-        inverse_code = ConformalRenderer.symbolic_inverse_code(code)
-    except Exception as exc:
-        inverse_code = None
-        if symbolic_expression:
-            Gimp.message(f"Conformal Mapping inverse warning: {exc}; using forward splatting for the transform.")
-    if symbolic_expression and inverse_code is None:
-        Gimp.message("Conformal Mapping inverse warning: SymPy could not solve this expression; using forward splatting for the transform.")
+    inverse_warning = None
+    if symbolic_expression:
+        try:
+            inverse_code = ConformalRenderer.symbolic_inverse_code(code)
+        except Exception as exc:
+            inverse_warning = f"Conformal Mapping inverse warning: {exc}; using forward splatting instead."
+        if inverse_code is None and inverse_warning is None:
+            inverse_warning = "Conformal Mapping inverse warning: SymPy could not solve this expression; using forward splatting instead."
+    if inverse_warning is not None:
+        Gimp.message(inverse_warning)
 
-    print(f"Conformal Mapping interpreted function: {ConformalRenderer._normalize_code(code)}", flush=True)
+    if run_mode == Gimp.RunMode.INTERACTIVE:
+        Gimp.progress_update(0.02)
+
+    print(f"Conformal Mapping interpreted function: {normalized_code}", flush=True)
     print(f"Conformal Mapping interpreted inverse: {inverse_code or 'none'}", flush=True)
 
     abyss_foreground_color = _gegl_to_u8(Gimp.context_get_foreground())
@@ -1492,7 +1591,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         renderer_full = ConformalRenderer(
             width,
             height,
-            code,
+            normalized_code,
             constraint,
             domain_xl,
             domain_xr,
@@ -1523,20 +1622,38 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         Gimp.message(f"Conformal Mapping source layer error: {exc}")
         return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
 
-    if run_mode == Gimp.RunMode.INTERACTIVE:
-        Gimp.progress_init("Rendering conformal map…")
-
     try:
-        mapped_pixels = renderer_full.render_mapped(
-            source_pixels,
-            progress_cb=(lambda value: Gimp.progress_update(value)) if (run_mode == Gimp.RunMode.INTERACTIVE and source_pixels is not None) else None,
-        ) if source_pixels is not None else None
-        if create_analysis:
+        if transform_layer and create_analysis:
+            if run_mode == Gimp.RunMode.INTERACTIVE:
+                Gimp.progress_init("Rendering transformed image…")
+            mapped_pixels = renderer_full.render_mapped(
+                source_pixels,
+                progress_cb=(lambda value: Gimp.progress_update(value * 0.5)) if (run_mode == Gimp.RunMode.INTERACTIVE and source_pixels is not None) else None,
+            ) if source_pixels is not None else None
+            if run_mode == Gimp.RunMode.INTERACTIVE:
+                Gimp.progress_init("Generating analysis layers…")
             arg_pixels, mod_pixels, grid_pixels, _ = renderer_full.render(
                 source_pixels=None,
-                progress_cb=None,
+                progress_cb=(lambda value: Gimp.progress_update(0.5 + value * 0.5)) if run_mode == Gimp.RunMode.INTERACTIVE else None,
+            )
+        elif transform_layer:
+            if run_mode == Gimp.RunMode.INTERACTIVE:
+                Gimp.progress_init("Rendering transformed image…")
+            mapped_pixels = renderer_full.render_mapped(
+                source_pixels,
+                progress_cb=(lambda value: Gimp.progress_update(value)) if (run_mode == Gimp.RunMode.INTERACTIVE and source_pixels is not None) else None,
+            ) if source_pixels is not None else None
+            arg_pixels = mod_pixels = grid_pixels = None
+        elif create_analysis:
+            mapped_pixels = None
+            if run_mode == Gimp.RunMode.INTERACTIVE:
+                Gimp.progress_init("Generating analysis layers…")
+            arg_pixels, mod_pixels, grid_pixels, _ = renderer_full.render(
+                source_pixels=None,
+                progress_cb=(lambda value: Gimp.progress_update(value)) if run_mode == Gimp.RunMode.INTERACTIVE else None,
             )
         else:
+            mapped_pixels = None
             arg_pixels = mod_pixels = grid_pixels = None
     except Exception as exc:
         Gimp.message(f"Conformal Mapping render error: {exc}")
