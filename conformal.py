@@ -145,6 +145,30 @@ def _complex_acot(z):
     return cmath.atan(1 / z)
 
 
+def _math_real(x):
+    return x.real if isinstance(x, complex) else x
+
+
+def _math_imag(x):
+    return x.imag if isinstance(x, complex) else 0
+
+
+def _math_conj(x):
+    return x.conjugate() if isinstance(x, complex) else x
+
+
+def _math_abs(x):
+    return math.sqrt((_math_real(x) ** 2) + (_math_imag(x) ** 2))
+
+
+def _math_abz(x):
+    return cmath.sqrt(x ** 2)
+
+
+def _math_sqr(x):
+    return x ** 2
+
+
 def _real_value(x):
     return x.real if isinstance(x, complex) else x
 
@@ -167,7 +191,7 @@ def _math_mod(x, y):
 
 def _math_sign(x):
     if isinstance(x, complex):
-        magnitude = abs(x)
+        magnitude = _math_abs(x)
         return 0 if magnitude == 0 else x / magnitude
     return 0 if x == 0 else (1 if x > 0 else -1)
 
@@ -191,6 +215,12 @@ for _name in dir(cmath):
     if not _name.startswith("_"):
         MATH_NAMESPACE[_name] = getattr(cmath, _name)
 MATH_NAMESPACE.update({
+    "abs": _math_abs,
+    "abz": _math_abz,
+    "real": _math_real,
+    "imag": _math_imag,
+    "conj": _math_conj,
+    "sqr": _math_sqr,
     "ceil": _math_ceil,
     "floor": _math_floor,
     "round": _math_round,
@@ -313,10 +343,15 @@ class ConformalRenderer:
                 raise ValueError(f"Unsupported code construct: {type(node).__name__}")
             if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Param)):
                 assigned_names.add(node.id)
-        allowed_names = set(MATH_NAMESPACE) | {"z", "zz", "w", "p"} | assigned_names
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                assigned_names.add(node.name)
+                for arg in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+                    assigned_names.add(arg.arg)
+                if node.args.vararg is not None:
+                    assigned_names.add(node.args.vararg.arg)
+                if node.args.kwarg is not None:
+                    assigned_names.add(node.args.kwarg.arg)
         for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in allowed_names:
-                raise ValueError(f"Unsupported symbol: {node.id}")
             if isinstance(node, ast.Attribute):
                 if not isinstance(node.value, ast.Name) or node.value.id not in {"math", "cmath"}:
                     raise ValueError(f"Unsupported attribute access: {ast.unparse(node)}")
@@ -332,8 +367,23 @@ class ConformalRenderer:
 
         transformations = standard_transformations + (implicit_multiplication_application, convert_xor)
         z, w = sp.symbols("z w")
+        def _sympy_real(x):
+            return sp.re(x)
+
+        def _sympy_imag(x):
+            return sp.im(x)
+
+        def _sympy_conj(x):
+            return sp.conjugate(x)
+
         def _sympy_abs(x):
+            return sp.sqrt((_sympy_real(x) ** 2) + (_sympy_imag(x) ** 2))
+
+        def _sympy_abz(x):
             return sp.sqrt(x ** 2)
+
+        def _sympy_sqr(x):
+            return x ** 2
 
         def _sympy_max(x, y):
             return (x + y + _sympy_abs(x - y)) / 2
@@ -345,7 +395,20 @@ class ConformalRenderer:
         for _name in ("sin", "cos", "tan", "csc", "sec", "cot", "sinh", "cosh", "tanh", "sqrt", "log", "exp", "sign", "floor", "ceiling"):
             if hasattr(sp, _name):
                 local_dict[_name] = getattr(sp, _name)
-        local_dict.update({"abs": _sympy_abs, "Abs": _sympy_abs, "max": _sympy_max, "min": _sympy_min, "ceil": sp.ceiling, "round": sp.floor, "mod": sp.Mod})
+        local_dict.update({
+            "abs": _sympy_abs,
+            "Abs": _sympy_abs,
+            "abz": _sympy_abz,
+            "real": _sympy_real,
+            "imag": _sympy_imag,
+            "conj": _sympy_conj,
+            "sqr": _sympy_sqr,
+            "max": _sympy_max,
+            "min": _sympy_min,
+            "ceil": sp.ceiling,
+            "round": sp.floor,
+            "mod": sp.Mod,
+        })
         for _arc_name in ("sin", "cos", "tan", "csc", "sec", "cot", "sinh", "cosh", "tanh"):
             _inverse_name = f"a{_arc_name}"
             if hasattr(sp, _inverse_name):
@@ -404,6 +467,35 @@ class ConformalRenderer:
         return snippet
 
     @staticmethod
+    def _uses_branch_helper(expression):
+        try:
+            tree = ast.parse((expression or "").strip().replace("^", "**"), mode="eval")
+        except SyntaxError:
+            return False
+        branch_helpers = {"abs", "Abs", "abz", "real", "imag", "max", "min", "floor", "ceil", "round", "mod", "sign"}
+        return any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in branch_helpers for node in ast.walk(tree))
+
+    @staticmethod
+    def _simple_call_inverse_code(expression):
+        try:
+            tree = ast.parse((expression or "").strip().replace("^", "**"), mode="eval")
+        except SyntaxError:
+            return None
+        call = tree.body
+        if not isinstance(call, ast.Call) or len(call.args) != 1 or call.keywords:
+            return None
+        if not isinstance(call.func, ast.Name):
+            return None
+        argument = call.args[0]
+        if not isinstance(argument, ast.Name) or argument.id != "z":
+            return None
+        if call.func.id == "sqr":
+            return "z = (w ** 0.5)"
+        if call.func.id == "conj":
+            return "z = (conj(w))"
+        return None
+
+    @staticmethod
     def _simple_power_inverse_code(expression):
         normalized = (expression or "").strip().replace("^", "**")
         try:
@@ -433,6 +525,12 @@ class ConformalRenderer:
         expression = ConformalRenderer._strip_w_assignment(code)
         if expression is None:
             return None
+        if ConformalRenderer._uses_branch_helper(expression):
+            return None
+
+        simple_call_inverse = ConformalRenderer._simple_call_inverse_code(expression)
+        if simple_call_inverse is not None:
+            return simple_call_inverse
 
         simple_inverse = ConformalRenderer._simple_power_inverse_code(expression)
         if simple_inverse is not None:
@@ -1579,7 +1677,7 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
         Gimp.message(inverse_warning)
 
     if run_mode == Gimp.RunMode.INTERACTIVE:
-        Gimp.progress_update(0.02)
+        Gimp.progress_update(0.10)
 
     print(f"Conformal Mapping interpreted function: {normalized_code}", flush=True)
     print(f"Conformal Mapping interpreted inverse: {inverse_code or 'none'}", flush=True)
@@ -1613,11 +1711,15 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
             abyss_foreground_color,
             abyss_background_color,
         )
+        if run_mode == Gimp.RunMode.INTERACTIVE:
+            Gimp.progress_update(0.15)
     except Exception as exc:
         Gimp.message(f"Conformal Mapping input error: {exc}")
         return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
     try:
         source_pixels = _drawable_pixels_rgba(source, width, height) if transform_layer else None
+        if run_mode == Gimp.RunMode.INTERACTIVE:
+            Gimp.progress_update(0.20)
     except Exception as exc:
         Gimp.message(f"Conformal Mapping source layer error: {exc}")
         return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, GLib.Error(str(exc)))
