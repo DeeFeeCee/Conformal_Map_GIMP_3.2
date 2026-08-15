@@ -29,7 +29,7 @@ Main controls:
 - `i` is interpreted as the imaginary unit (`j`).
 - `2z` style shorthand is normalized to `2*z`.
 - Helper functions/recursion are supported as long as final code assigns `w`.
-- For a single expression of the form `w = f(z)` (or just `f(z)`), the transform uses SymPy to solve for the symbolic inverse and samples the source image with that inverse.
+- For a single expression of the form `w = f(z)` (or just `f(z)`), the transform uses SymPy to solve for a symbolic inverse and samples the source image with it only when the candidate recovers representative source points. Expressions that discard source information through a principal branch, such as `sqrt(sqr(z))`, use forward mapping instead.
 - Python code and formulas that cannot be inverted fall back to forward mapping with the **Forward precision** slider.
 
 ## License

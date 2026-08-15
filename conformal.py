@@ -14,7 +14,7 @@ the Free Software Foundation, version 2 of the License.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
@@ -397,7 +397,6 @@ class ConformalRenderer:
                 local_dict[_name] = getattr(sp, _name)
         local_dict.update({
             "abs": _sympy_abs,
-            "Abs": _sympy_abs,
             "abz": _sympy_abz,
             "real": _sympy_real,
             "imag": _sympy_imag,
@@ -472,7 +471,7 @@ class ConformalRenderer:
             tree = ast.parse((expression or "").strip().replace("^", "**"), mode="eval")
         except SyntaxError:
             return False
-        branch_helpers = {"abs", "Abs", "abz", "real", "imag", "max", "min", "floor", "ceil", "round", "mod", "sign"}
+        branch_helpers = {"abs", "abz", "real", "imag", "max", "min", "floor", "ceil", "round", "mod", "sign"}
         return any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in branch_helpers for node in ast.walk(tree))
 
     @staticmethod
@@ -490,7 +489,7 @@ class ConformalRenderer:
         if not isinstance(argument, ast.Name) or argument.id != "z":
             return None
         if call.func.id == "sqr":
-            return "z = (w ** 0.5)"
+            return "z = (sqrt(w))"
         if call.func.id == "conj":
             return "z = (conj(w))"
         return None
@@ -546,7 +545,45 @@ class ConformalRenderer:
         if not solutions:
             return None
         inverse_expr = sp.sstr(solutions[0]).replace("I", "1j")
-        return f"z = ({inverse_expr})"
+        inverse_code = f"z = ({inverse_expr})"
+        # ``solve`` can return a formal algebraic solution even when the
+        # original expression loses information through a principal branch.
+        # For example, sqrt(z**2) folds opposite source points together. The
+        # inverse sampler must recover the source point, not merely produce a
+        # point with the same forward value.
+        if not ConformalRenderer._is_source_recovering_inverse(code, inverse_code):
+            return None
+        return inverse_code
+
+    @staticmethod
+    def _is_source_recovering_inverse(code, inverse_code):
+        """Return whether g(f(z)) == z for representative source points."""
+        try:
+            forward_code = compile(ConformalRenderer._normalize_code(code), "conformal-forward-check", "exec")
+            compiled_inverse = compile(inverse_code, "conformal-inverse-check", "exec")
+        except Exception:
+            return False
+
+        # Include both half-planes. This catches sqrt(z**2), whose principal
+        # root has discarded which side supplied the point, while preserving
+        # sqrt(z) -> z = w**2 because (sqrt(z))**2 = z.
+        # Chosen are points between origin & 1, not between center & corners.
+        samples = (-0.5 - 0.5j, -0.5 + 0.5j, 0.5 - 0.5j, 0.5 + 0.5j)
+        for z in samples:
+            forward_env = {"z": z, "w": 0j}
+            forward_env.update(MATH_NAMESPACE)
+            inverse_env = {"w": 0j, "z": 0j}
+            inverse_env.update(MATH_NAMESPACE)
+            try:
+                exec(forward_code, {"__builtins__": {}}, forward_env)
+                inverse_env["w"] = forward_env["w"]
+                exec(compiled_inverse, {"__builtins__": {}}, inverse_env)
+                recovered = inverse_env["z"]
+                if abs(recovered - z) > 1e-7 * max(1.0, abs(z)):
+                    return False
+            except Exception:
+                return False
+        return True
 
     @staticmethod
     def _clamp_u8(x):
@@ -822,7 +859,6 @@ class ConformalRenderer:
 
     def _render_inverse_mapped(self, source_pixels, progress_cb=None):
         mapped_data = bytearray(self.width * self.height * 4)
-        forward_mapped = self._render_forward_mapped(source_pixels) if self.abyss_mode != "transparent" else None
         max_progress = float(self.width * self.height)
         progress = 0.0
         for row in range(self.height):
@@ -832,38 +868,16 @@ class ConformalRenderer:
                 w = col / self._domain_sx + self.domain_xl + 1j * imag
                 valid, z = self._evaluate_inverse_point(w)
                 idx = base + (col * 4)
-                forward_px = None
-                if forward_mapped is not None:
-                    forward_px = tuple(forward_mapped[idx:idx + 4])
 
                 if valid:
                     sx, sy = self._source_coord_to_pixel(z)
                     mapped_px = self._sample_mapped_pixel(source_pixels, sx, sy)
-                    if not self._pixel_in_source_bounds(sx, sy) and forward_px is not None and forward_px[3] > 0:
-                        mapped_px = forward_px
-                elif forward_px is not None and forward_px[3] > 0:
-                    mapped_px = forward_px
                 else:
                     mapped_px = (0, 0, 0, 0)
                 mapped_data[idx:idx + 4] = bytes(mapped_px)
                 progress += 1.0
             if progress_cb is not None:
-                progress_cb((progress / max_progress) * 0.5)
-
-        # Paint the actual transformed image over the abyss fill, so abyss pixels
-        # cannot cover source pixels even when wrap iterations are zero.
-        forward_mapped = self._render_forward_mapped(
-            source_pixels,
-            (lambda value: progress_cb(0.5 + value * 0.45)) if progress_cb is not None else None,
-        )
-        overlay_progress = 0.0
-        overlay_max = float(max(1, len(mapped_data) // 4))
-        for idx in range(0, len(mapped_data), 4):
-            if forward_mapped[idx + 3] > 0:
-                mapped_data[idx:idx + 4] = forward_mapped[idx:idx + 4]
-            overlay_progress += 1.0
-            if progress_cb is not None and idx % (self.width * 64) == 0:
-                progress_cb(0.95 + (overlay_progress / overlay_max) * 0.05)
+                progress_cb(progress / max_progress)
         if progress_cb is not None:
             progress_cb(1.0)
         return bytes(mapped_data)
