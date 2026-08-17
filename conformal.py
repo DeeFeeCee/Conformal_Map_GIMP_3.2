@@ -1279,8 +1279,8 @@ def _show_dialog(procedure, config, width, height):
             selected_side_px = max(width, height) if scale_basis_check.get_active() else min(width, height)
             selected_half_px = selected_side_px / 2.0
             safe_scale = max(abs(scale_widgets["scale"][0].get_value()), 1e-9)
-            img_cx = (width - 1) / 2.0
-            img_cy = (height - 1) / 2.0
+            img_cx = width / 2.0
+            img_cy = height / 2.0
             if old == "relative" and new == "pixels":
                 scale_widgets["center-x"][0].set_value(img_cx + (cx / safe_scale) * selected_half_px)
                 scale_widgets["center-y"][0].set_value(img_cy - (cy / safe_scale) * selected_half_px)
@@ -1637,8 +1637,8 @@ def conformal_run(procedure, run_mode, image, drawables, config, data):
     selected_side = long_side if scale_long_side else short_side
     selected_half_px = selected_side / 2.0
     safe_scale = max(abs(scale_value), 1e-9)
-    img_cx = (width - 1) / 2.0
-    img_cy = (height - 1) / 2.0
+    img_cx = width / 2.0
+    img_cy = height / 2.0
 
     if not transform_layer and not create_analysis:
         Gimp.message("Conformal Mapping: select Transform active layer and/or Add analysis layers to run.")
